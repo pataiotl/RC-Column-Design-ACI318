@@ -10,7 +10,7 @@ import numpy as np
 # ==========================================
 
 def generate_pm_curve(b, h, fc, fy, ast):
-    """Generates a P-M interaction curve using ACI 318 strain compatibility."""
+    """Generates an ACI 318 compliant DESIGN P-M interaction curve (phi*Pn, phi*Mn)."""
     cover = 50
     d = h - cover
     d_prime = cover
@@ -19,26 +19,60 @@ def generate_pm_curve(b, h, fc, fy, ast):
     Es = 200000
     ecu = 0.003
 
+    # Yield strain of steel
+    eps_y = fy / Es
+
     beta1 = 0.85 if fc <= 28 else max(0.65, 0.85 - 0.05 * ((fc - 28) / 7))
+    Ag = b * h
+
+    # ACI 22.4.2.1: Maximum nominal axial strength Po
+    Po = 0.85 * fc * (Ag - ast) + fy * ast
+    # ACI 22.4.2.1: Tied column max axial factor = 0.80
+    Pn_max = 0.80 * Po
+
     curve_points = []
     c = h * 2.0
 
-    while c > 10:
+    while c > 5:  # Lower bound for c
         a = min(beta1 * c, h)
         Cc = 0.85 * fc * a * b
+
         eps_top = ecu * (c - d_prime) / c
         eps_bot = ecu * (d - c) / c
+
         fs_top = min(fy, max(-fy, eps_top * Es))
         fs_bot = min(fy, max(-fy, -eps_bot * Es))
+
         Cs = as_top * fs_top
         Ts = as_bot * fs_bot
-        Pn_kN = (Cc + Cs + Ts) / 1000
+
+        Pn_newtons = Cc + Cs + Ts
+
         Mc = Cc * (h / 2 - a / 2)
         Ms_top = Cs * (h / 2 - d_prime)
         Ms_bot = abs(Ts) * (d - h / 2)
-        Mn_kNm = (Mc + Ms_top + Ms_bot) / 1000000
-        curve_points.append({'Moment_kNm': round(Mn_kNm, 1), 'Axial_kN': round(Pn_kN, 1)})
-        c -= 20
+
+        Mn_Nmm = Mc + Ms_top + Ms_bot
+
+        # Determine Strength Reduction Factor (phi) per ACI 318 Sec. 21.2.2
+        eps_t = eps_bot  # Strain in extreme tension steel
+        if eps_t <= eps_y:
+            phi = 0.65  # Compression controlled (assuming tied column)
+        elif eps_t >= (eps_y + 0.003):
+            phi = 0.90  # Tension controlled
+        else:
+            # Transition zone
+            phi = 0.65 + 0.25 * ((eps_t - eps_y) / 0.003)
+
+        # Apply phi and Pn_max cutoff
+        design_Pn = min(phi * Pn_newtons, 0.65 * Pn_max) / 1000  # Convert to kN
+        design_Mn = (phi * Mn_Nmm) / 1000000  # Convert to kNm
+
+        # Only record positive or slightly negative axial loads
+        if design_Pn > - (ast * fy * 0.9) / 1000:
+            curve_points.append({'Moment_kNm': round(design_Mn, 1), 'Axial_kN': round(design_Pn, 1)})
+
+        c -= 5  # Finer step for a smoother curve
 
     return pd.DataFrame(curve_points)
 
@@ -197,10 +231,11 @@ if uploaded_file is not None:
     # --- Draw Interaction Diagram ---
     pm_data = generate_pm_curve(b, h, fc, fy, ast)
 
-    st.subheader("Interaction Diagram: Local Axes")
+    st.subheader("Interaction Diagram: PMM")
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    curve_label = f'Nominal Capacity ({optimized_name})' if auto_optimize and optimized_name else 'Nominal Capacity'
+    # Updated Legend Label
+    curve_label = f'Design Capacity ({optimized_name})' if auto_optimize and optimized_name else 'Design Capacity (\u03c6Pn, \u03c6Mn)'
 
     ax.plot(pm_data['Moment_kNm'], pm_data['Axial_kN'], label=curve_label, color='blue', linewidth=2)
     ax.scatter(df['M2_Mag_kNm'], df['P_Demand_kN'], color='mediumseagreen', label='M2 Demands', zorder=5, s=50,
