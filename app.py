@@ -3,35 +3,85 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import math
 import numpy as np
+from fpdf import FPDF
+import tempfile
 
 
 # ==========================================
 # 1. THE ENGINEERING ENGINES
 # ==========================================
 
+def create_pdf(frame_name, b, h, fc, fy, layout_text, max_ratio, max_combo, fig):
+    """Generates a formatted A4 PDF calculation report."""
+    pdf = FPDF()
+    pdf.add_page()
+
+    # Header
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, f"RC Column Design Report - Frame: {frame_name}", ln=True, align='C')
+    pdf.ln(5)
+
+    # Section Properties
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "1. Section Properties", ln=True)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(0, 6, f"Dimensions: {b} mm x {h} mm", ln=True)
+    pdf.cell(0, 6, f"Concrete Compressive Strength (f'c): {fc} MPa", ln=True)
+    pdf.cell(0, 6, f"Steel Yield Strength (fy): {fy} MPa", ln=True)
+    pdf.ln(5)
+
+    # Rebar Layout
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "2. Reinforcement Layout", ln=True)
+    pdf.set_font("Arial", '', 11)
+    pdf.cell(0, 6, f"Design Layout: {layout_text}", ln=True)
+    pdf.ln(5)
+
+    # Results Summary
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "3. Design Summary", ln=True)
+    pdf.set_font("Arial", '', 11)
+    if max_ratio > 1.0:
+        pdf.set_text_color(220, 53, 69)  # Red text for failure
+        status = "FAIL"
+    else:
+        pdf.set_text_color(40, 167, 69)  # Green text for pass
+        status = "PASS"
+
+    pdf.cell(0, 6, f"Status: {status}", ln=True)
+    pdf.cell(0, 6, f"Maximum PMM Ratio: {max_ratio}", ln=True)
+    pdf.cell(0, 6, f"Governing Load Combination: {max_combo}", ln=True)
+    pdf.set_text_color(0, 0, 0)  # Reset to black
+    pdf.ln(5)
+
+    # Interaction Diagram
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "4. PMM Interaction Diagram", ln=True)
+
+    # Save the matplotlib plot to a temporary file and insert it into the PDF
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
+        fig.savefig(tmpfile.name, format="png", bbox_inches="tight", dpi=300)
+        pdf.image(tmpfile.name, x=15, w=180)
+
+    # Return the PDF as bytes
+    return pdf.output(dest='S').encode('latin-1')
+
+
 def generate_pm_curve(width, depth, fc, fy, cover_mm, n_width, n_depth, bar_dia):
     """Generates an ACI 318 DESIGN P-M curve using a true 4-face discrete rebar array."""
-    tie_dia = 10  # Assuming standard 10mm confinement ties
+    tie_dia = 10
     d_prime = cover_mm + tie_dia + (bar_dia / 2)
     bar_area = math.pi * (bar_dia ** 2) / 4
 
-    # --- Build the Discrete Rebar Cage ---
     layers = []
-    # 1. Top face row
     layers.append({'area': n_width * bar_area, 'd': d_prime})
-
-    # 2. Intermediate side faces
     if n_depth > 2:
         spacing = (depth - 2 * d_prime) / (n_depth - 1)
         for i in range(1, n_depth - 1):
             layers.append({'area': 2 * bar_area, 'd': d_prime + i * spacing})
-
-    # 3. Bottom face row
     layers.append({'area': n_width * bar_area, 'd': depth - d_prime})
 
     total_ast = sum(layer['area'] for layer in layers)
-
-    # --- Strain Compatibility ---
     Es = 200000
     ecu = 0.003
     eps_y = fy / Es
@@ -47,27 +97,20 @@ def generate_pm_curve(width, depth, fc, fy, cover_mm, n_width, n_depth, bar_dia)
         a = min(beta1 * c, depth)
         Cc = 0.85 * fc * a * width
         Mc_concrete = Cc * (depth / 2 - a / 2)
+        Fs_total = Ms_total = 0
 
-        Fs_total = 0
-        Ms_total = 0
-
-        # Calculate force in every individual rebar layer
         for layer in layers:
             eps_s = ecu * (c - layer['d']) / c
             f_s = min(fy, max(-fy, eps_s * Es))
             force = layer['area'] * f_s
-
-            # Deduct displaced concrete if the bar is inside the compression block
             if layer['d'] <= a and eps_s > 0:
                 force -= layer['area'] * 0.85 * fc
-
             Fs_total += force
             Ms_total += force * (depth / 2 - layer['d'])
 
         Pn_newtons = Cc + Fs_total
         Mn_Nmm = Mc_concrete + Ms_total
 
-        # phi factor based on the extreme tension steel (the very last layer)
         eps_t = ecu * (c - layers[-1]['d']) / c
         if eps_t <= eps_y:
             phi = 0.65
@@ -113,16 +156,14 @@ def get_dc_ratio(pm_data, P_demand, M_demand):
 
 
 def run_optimizer(df, b, h, fc, fy, cover, lu, k, cm, beta_dns):
-    """Tests realistic physical layouts (e.g. 4x4, 4x6) to find the best design."""
     Ag = b * h
     min_ast = 0.01 * Ag
     max_ast = 0.08 * Ag
-    bars = {'DB12': 12, 'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
+    bars = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
 
     configs = []
     for name, dia in bars.items():
         area = math.pi * (dia ** 2) / 4
-        # Test realistic grids from 3x3 up to 12x12
         for nw in range(3, 13):
             for nd in range(3, 13):
                 total_bars = 2 * nw + 2 * (nd - 2)
@@ -136,7 +177,6 @@ def run_optimizer(df, b, h, fc, fy, cover, lu, k, cm, beta_dns):
     configs = sorted(configs, key=lambda x: x['Ast'])
 
     for config in configs:
-        # Generate independent curves for each axis using the discrete arrays
         pm_test_2 = generate_pm_curve(h, b, fc, fy, cover, config['nd'], config['nw'], config['dia'])
         pm_test_3 = generate_pm_curve(b, h, fc, fy, cover, config['nw'], config['nd'], config['dia'])
 
@@ -146,10 +186,7 @@ def run_optimizer(df, b, h, fc, fy, cover, lu, k, cm, beta_dns):
             m2_res = calculate_magnified_moment(P, row['M2_Demand_kNm'], h, b, fc, lu, k, cm, beta_dns)
             m3_res = calculate_magnified_moment(P, row['M3_Demand_kNm'], b, h, fc, lu, k, cm, beta_dns)
 
-            dc2 = get_dc_ratio(pm_test_2, P, m2_res.iloc[0])
-            dc3 = get_dc_ratio(pm_test_3, P, m3_res.iloc[0])
-
-            if dc2 > 1.0 or dc3 > 1.0:
+            if get_dc_ratio(pm_test_2, P, m2_res.iloc[0]) > 1.0 or get_dc_ratio(pm_test_3, P, m3_res.iloc[0]) > 1.0:
                 all_pass = False
                 break
         if all_pass: return config
@@ -169,7 +206,7 @@ h = st.sidebar.number_input("Depth (h, Axis 3) in mm", value=800, step=50)
 fc = st.sidebar.number_input("f'c (MPa)", value=40, step=5)
 fy = st.sidebar.number_input("fy (MPa)", value=500, step=10)
 
-st.sidebar.header("2. Longitudinal Bars (ETABS Layout)")
+st.sidebar.header("2. Longitudinal Bars")
 auto_optimize = st.sidebar.checkbox("🚀 Enable Auto-Design Optimizer")
 optimized_name = ""
 
@@ -209,6 +246,7 @@ if uploaded_file is not None:
         df['M3_Demand_kNm'] = df['M3']
     else:
         df = df_raw.copy()
+        selected_frame = "Custom"
 
     st.sidebar.header("4. Slenderness & Creep")
     lu = st.sidebar.number_input("Unsupported Length (lu) in mm", value=3000, step=100)
@@ -224,7 +262,7 @@ if uploaded_file is not None:
             optimized_name = best_layout['Name']
         else:
             st.error("❌ **Optimization Failed:** Section fails even at 8% limit.")
-            n3_bars, n2_bars, bar_dia = 10, 10, 32  # Fallback to draw failed curve
+            n3_bars, n2_bars, bar_dia = 10, 10, 32
 
     df[['M2_Mag_kNm', 'Delta_2']] = df.apply(lambda row: calculate_magnified_moment(
         row['P_Demand_kN'], row['M2_Demand_kNm'], h, b, fc, lu, k_factor, cm_val, beta_dns), axis=1)
@@ -232,9 +270,8 @@ if uploaded_file is not None:
     df[['M3_Mag_kNm', 'Delta_3']] = df.apply(lambda row: calculate_magnified_moment(
         row['P_Demand_kN'], row['M3_Demand_kNm'], b, h, fc, lu, k_factor, cm_val, beta_dns), axis=1)
 
-    # Generate exact curves based on 2-axis and 3-axis geometries
-    pm_data_2 = generate_pm_curve(h, b, fc, fy, cover_mm, n2_bars, n3_bars, bar_dia)  # M2 Graph
-    pm_data_3 = generate_pm_curve(b, h, fc, fy, cover_mm, n3_bars, n2_bars, bar_dia)  # M3 Graph
+    pm_data_2 = generate_pm_curve(h, b, fc, fy, cover_mm, n2_bars, n3_bars, bar_dia)
+    pm_data_3 = generate_pm_curve(b, h, fc, fy, cover_mm, n3_bars, n2_bars, bar_dia)
 
     df['DC_2'] = df.apply(lambda row: get_dc_ratio(pm_data_2, row['P_Demand_kN'], row['M2_Mag_kNm']), axis=1)
     df['DC_3'] = df.apply(lambda row: get_dc_ratio(pm_data_3, row['P_Demand_kN'], row['M3_Mag_kNm']), axis=1)
@@ -254,11 +291,16 @@ if uploaded_file is not None:
         st.success(f"### ✅ MAX PMM RATIO: {max_ratio} \n**Governing Combo:** `{max_combo}` | **{layout_text}**")
     st.markdown("---")
 
+    max_delta = max(df['Delta_2'].max(), df['Delta_3'].max())
+    if max_delta >= 990:
+        st.error("🚨 **CRITICAL FAILURE:** Column will buckle!")
+    elif max_delta > 1.4:
+        st.warning("⚠️ **SLENDERNESS WARNING:** Moment magnifier (δ) > 1.4.")
+
     st.subheader("Interaction Diagram: PMM")
     fig, ax = plt.subplots(figsize=(8, 6))
     curve_label = f'Design Capacity ({layout_text})'
 
-    # We plot the curve corresponding to the governing axis for visual clarity
     governing_pm = pm_data_2 if df['DC_2'].max() > df['DC_3'].max() else pm_data_3
 
     ax.plot(governing_pm['Moment_kNm'], governing_pm['Axial_kN'], label=curve_label, color='blue', linewidth=2)
@@ -299,3 +341,18 @@ if uploaded_file is not None:
     styled_df = styled_df.map(highlight_pmm, subset=['PMM_Ratio'])
 
     st.dataframe(styled_df, use_container_width=True)
+
+    # --- PDF EXPORT FEATURE ---
+    st.markdown("---")
+    st.subheader("📄 Export Calculation Report")
+
+    # Run the PDF generator engine
+    pdf_bytes = create_pdf(selected_frame, b, h, fc, fy, layout_text, max_ratio, max_combo, fig)
+
+    # Streamlit Download Button
+    st.download_button(
+        label="📥 Download PDF Report",
+        data=pdf_bytes,
+        file_name=f"Design_Report_Frame_{selected_frame}.pdf",
+        mime="application/pdf"
+    )
