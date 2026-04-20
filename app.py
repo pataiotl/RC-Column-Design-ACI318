@@ -13,6 +13,8 @@ import tempfile
 
 def create_pdf(frame_name, b, h, fc, fy, layout_text, max_ratio, max_combo, fig):
     """Generates a formatted A4 PDF calculation report."""
+    import os  # Ensure os is imported for cleanup
+
     pdf = FPDF()
     pdf.add_page()
 
@@ -63,8 +65,20 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, max_ratio, max_combo, fig)
         fig.savefig(tmpfile.name, format="png", bbox_inches="tight", dpi=300)
         pdf.image(tmpfile.name, x=15, w=180)
 
-    # Return the PDF as bytes
-    return pdf.output(dest='S').encode('latin-1')
+    # Safely extract PDF as bytes using a temporary file
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        pdf.output(tmp_pdf.name)
+        with open(tmp_pdf.name, "rb") as f:
+            pdf_bytes = f.read()
+
+    # Clean up both temporary files to prevent server memory leaks
+    try:
+        os.remove(tmpfile.name)
+        os.remove(tmp_pdf.name)
+    except Exception:
+        pass
+
+    return pdf_bytes
 
 
 def generate_pm_curve(width, depth, fc, fy, cover_mm, n_width, n_depth, bar_dia):
