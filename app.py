@@ -715,8 +715,8 @@ st.caption(
     "refer to the PMM column in the table below."
 )
 
-# Shrunk from (8, 6) to (5, 4) for a much cleaner UI footprint
-fig, ax = plt.subplots(figsize=(4, 2), dpi=120)
+# Shrunk further from (5, 4) to (2.5, 2) for an ultra-compact UI
+fig, ax = plt.subplots(figsize=(2.5, 2), dpi=120)
 gov_pm = pm2 if df['DC_2'].max() > df['DC_3'].max() else pm3
 gov_label = "Axis-2 (M2 governs)" if df['DC_2'].max() > df['DC_3'].max() else "Axis-3 (M3 governs)"
 
@@ -743,7 +743,7 @@ plt.colorbar(plt.cm.ScalarMappable(
     cmap='RdYlGn_r',
     norm=plt.Normalize(0, 1.2)), ax=ax, label='DC ratio')
 plt.tight_layout()
-# Forces Streamlit to respect our new smaller figsize instead of blowing it up
+# Ensures Streamlit respects our new ultra-small figsize
 st.pyplot(fig, use_container_width=False)
 
 # -- Results table --
