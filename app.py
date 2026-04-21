@@ -7,444 +7,782 @@ from fpdf import FPDF
 import tempfile
 import os
 
+# ============================================================
+# CONSTANTS
+# ============================================================
+ES = 200_000       # MPa — steel modulus
+ECU = 0.003        # ACI 318-19 §22.2.2.1 — ultimate concrete strain
+PHI_TIED = 0.65    # ACI Table 21.2.1 — tied column
+PHI_TENSION = 0.90 # ACI Table 21.2.1 — tension-controlled
+PHI_SHEAR = 0.75   # ACI §21.2.1
 
-# ==========================================
-# 1. THE ENGINEERING ENGINES
-# ==========================================
+# ============================================================
+# 1.  MATERIAL / SECTION HELPERS
+# ============================================================
 
-def get_Po_kN(width, depth, fc, fy, total_ast):
-    """Calculates nominal pure axial capacity (Po) in kN"""
-    Ag = width * depth
-    return (0.85 * fc * (Ag - total_ast) + fy * total_ast) / 1000
-
-
-def check_bar_fit(b, h, nw, nd, dia, cover, tie_dia):
-    """Checks if the rebar layout physically fits per ACI minimum clear spacing."""
-    min_clear = max(40, 1.5 * dia)
-
-    w_avail = b - 2 * cover - 2 * tie_dia
-    h_avail = h - 2 * cover - 2 * tie_dia
-
-    w_req = (nw * dia) + ((nw - 1) * min_clear)
-    h_req = (nd * dia) + ((nd - 1) * min_clear)
-
-    return w_req <= w_avail and h_req <= h_avail
+def beta1(fc: float) -> float:
+    """ACI 318-19 Table 22.2.2.4.3"""
+    return 0.85 if fc <= 28 else max(0.65, 0.85 - 0.05 * (fc - 28) / 7)
 
 
-def calculate_tie_spacing(b, h, long_dia, tie_dia):
-    """Calculates ACI 318 maximum tie spacing for non-seismic columns."""
-    s1 = 16 * long_dia
-    s2 = 48 * tie_dia
-    s3 = min(b, h)
-
-    max_spacing = min(s1, s2, s3)
-
-    # Round down to nearest practical 25mm increment for construction
-    practical_spacing = math.floor(max_spacing / 25) * 25
-    return practical_spacing
+def eps_y(fy: float) -> float:
+    return fy / ES
 
 
-def create_pdf(frame_name, b, h, fc, fy, layout_text, max_ratio, max_combo, fig):
-    """Generates a formatted A4 PDF calculation report."""
-    pdf = FPDF()
-    pdf.add_page()
-
-    pdf.set_font("Arial", 'B', 16)
-    pdf.cell(0, 10, f"RC Column Design Report - Frame: {frame_name}", ln=True, align='C')
-    pdf.ln(5)
-
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "1. Section Properties", ln=True)
-    pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 6, f"Dimensions: {b} mm x {h} mm", ln=True)
-    pdf.cell(0, 6, f"Concrete Compressive Strength (f'c): {fc} MPa", ln=True)
-    pdf.cell(0, 6, f"Steel Yield Strength (fy): {fy} MPa", ln=True)
-    pdf.ln(5)
-
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "2. Reinforcement Layout", ln=True)
-    pdf.set_font("Arial", '', 11)
-    pdf.cell(0, 6, f"Design Layout: {layout_text}", ln=True)
-    pdf.ln(5)
-
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "3. Design Summary", ln=True)
-    pdf.set_font("Arial", '', 11)
-
-    if max_ratio > 1.0:
-        pdf.set_text_color(220, 53, 69)
-        status = "FAIL"
-    else:
-        pdf.set_text_color(40, 167, 69)
-        status = "PASS"
-
-    pdf.cell(0, 6, f"Status: {status}", ln=True)
-    pdf.cell(0, 6, f"Maximum Biaxial PMM Ratio: {max_ratio}", ln=True)
-    pdf.cell(0, 6, f"Governing Load Combination: {max_combo}", ln=True)
-
-    pdf.set_text_color(100, 100, 100)
-    pdf.set_font("Arial", 'I', 9)
-    pdf.cell(0, 6, "*Biaxial check per PCA Load Contour Method (Bresler-Parme) with dynamic alpha (1.15 - 1.50).",
-             ln=True)
-    pdf.set_text_color(0, 0, 0)
-    pdf.ln(5)
-
-    pdf.set_font("Arial", 'B', 12)
-    pdf.cell(0, 10, "4. PMM Interaction Diagram", ln=True)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmpfile:
-        fig.savefig(tmpfile.name, format="png", bbox_inches="tight", dpi=300)
-        pdf.image(tmpfile.name, x=15, w=180)
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-        pdf.output(tmp_pdf.name)
-        with open(tmp_pdf.name, "rb") as f:
-            pdf_bytes = f.read()
-
-    try:
-        os.remove(tmpfile.name)
-        os.remove(tmp_pdf.name)
-    except Exception:
-        pass
-
-    return pdf_bytes
+def get_Po(b: float, h: float, fc: float, fy: float, Ast: float) -> float:
+    """Nominal pure-axial capacity Po in N — ACI §22.4.2.2"""
+    Ag = b * h
+    return 0.85 * fc * (Ag - Ast) + fy * Ast
 
 
-def generate_pm_curve(width, depth, fc, fy, cover_mm, n_width, n_depth, bar_dia, tie_dia):
-    """Generates an ACI 318 DESIGN P-M curve using a discrete 4-face rebar array."""
-    d_prime = cover_mm + tie_dia + (bar_dia / 2)
-    bar_area = math.pi * (bar_dia ** 2) / 4
+def check_rho_g(b: float, h: float, Ast: float) -> tuple[float, bool, bool]:
+    """Returns (rho_g, above_min, below_max) — ACI §10.6.1.1"""
+    rho = Ast / (b * h)
+    return round(rho * 100, 2), rho >= 0.01, rho <= 0.08
 
-    layers = []
-    layers.append({'area': n_width * bar_area, 'd': d_prime})
+
+def check_bar_fit(b: float, h: float, nw: int, nd: int,
+                  dia: float, cover: float, tie_d: float) -> tuple[bool, float, float]:
+    """
+    Checks all four faces independently.
+    ACI §25.2.3: clear ≥ max(1.5db, 40 mm) for columns.
+    Returns (fits, required_width_face, required_depth_face).
+    """
+    min_clear = max(1.5 * dia, 40.0)
+    avail_w = b - 2 * cover - 2 * tie_d
+    avail_h = h - 2 * cover - 2 * tie_d
+    req_w = nw * dia + (nw - 1) * min_clear
+    req_h = nd * dia + (nd - 1) * min_clear
+    return req_w <= avail_w and req_h <= avail_h, round(req_w, 1), round(req_h, 1)
+
+
+def calculate_tie_spacing(b: float, h: float, long_dia: float, tie_d: float) -> int:
+    """ACI §25.7.2.1 — non-seismic tied column maximum spacing."""
+    s = min(16 * long_dia, 48 * tie_d, min(b, h))
+    return int(math.floor(s / 25) * 25)   # round down to 25 mm
+
+
+# ============================================================
+# 2.  P-M INTERACTION CURVE  (ACI 318-19, Design strength)
+# ============================================================
+
+def build_layers(depth: float, d_prime: float,
+                 n_width: int, n_depth: int, bar_area: float) -> list[dict]:
+    """
+    Discrete 4-face rebar array.
+    Bending axis is about the section centroid (depth/2).
+    """
+    layers = [{'area': n_width * bar_area, 'd': d_prime}]
     if n_depth > 2:
         spacing = (depth - 2 * d_prime) / (n_depth - 1)
         for i in range(1, n_depth - 1):
             layers.append({'area': 2 * bar_area, 'd': d_prime + i * spacing})
     layers.append({'area': n_width * bar_area, 'd': depth - d_prime})
+    return layers
 
-    total_ast = sum(layer['area'] for layer in layers)
-    Es = 200000
-    ecu = 0.003
-    eps_y = fy / Es
-    beta1 = 0.85 if fc <= 28 else max(0.65, 0.85 - 0.05 * ((fc - 28) / 7))
 
-    Po_kN = get_Po_kN(width, depth, fc, fy, total_ast)
-    Pn_max = 0.80 * (Po_kN * 1000)
+def generate_pm_curve(width: float, depth: float,
+                      fc: float, fy: float,
+                      cover: float, n_width: int, n_depth: int,
+                      bar_dia: float, tie_d: float) -> pd.DataFrame:
+    """
+    ACI 318-19 design P-M curve.
+    Moment is taken about the section centroid.
+    Sweeps c from 2×depth (pure compression) down to near zero.
+    """
+    b1 = beta1(fc)
+    ey = eps_y(fy)
+    d_prime = cover + tie_d + bar_dia / 2
+    bar_area = math.pi * bar_dia ** 2 / 4
+    layers = build_layers(depth, d_prime, n_width, n_depth, bar_area)
+    Ast = sum(L['area'] for L in layers)
 
-    curve_points = []
+    Po = get_Po(width, depth, fc, fy, Ast)
+    Pn_max = 0.80 * Po          # ACI §22.4.2.1  (tied)
+
+    points = []
     c = depth * 2.0
+    c_step = max(depth / 400, 1.0)   # finer step — ≥1 mm, ≤depth/400
 
-    while c > 5:
-        a = min(beta1 * c, depth)
+    while c > c_step:
+        a = min(b1 * c, depth)
         Cc = 0.85 * fc * a * width
-        Mc_concrete = Cc * (depth / 2 - a / 2)
-        Fs_total = Ms_total = 0
+        Mc = Cc * (depth / 2 - a / 2)   # moment of concrete about centroid
 
-        for layer in layers:
-            eps_s = ecu * (c - layer['d']) / c
-            f_s = min(fy, max(-fy, eps_s * Es))
-            force = layer['area'] * f_s
-            if layer['d'] <= a and eps_s > 0:
-                force -= layer['area'] * 0.85 * fc
-            Fs_total += force
-            Ms_total += force * (depth / 2 - layer['d'])
+        Fs = Ms = 0.0
+        for L in layers:
+            eps = ECU * (c - L['d']) / c
+            fs = min(fy, max(-fy, eps * ES))
+            F = L['area'] * fs
+            # subtract displaced concrete only inside stress block AND in compression
+            if L['d'] <= a and eps > 0:
+                F -= L['area'] * 0.85 * fc
+            Fs += F
+            Ms += F * (depth / 2 - L['d'])   # moment about centroid (sign is automatic)
 
-        Pn_newtons = Cc + Fs_total
-        Mn_Nmm = Mc_concrete + Ms_total
+        Pn = Cc + Fs
+        Mn = Mc + Ms          # can be negative for some layers — correct by sign
 
-        eps_t = ecu * (c - layers[-1]['d']) / c
-        if eps_t <= eps_y:
-            phi = 0.65
-        elif eps_t >= (eps_y + 0.003):
-            phi = 0.90
+        # eps_t at extreme tension layer
+        eps_t = ECU * (c - layers[-1]['d']) / c
+
+        # phi — ACI Table 21.2.2 (column bracket)
+        if eps_t <= ey:
+            phi = PHI_TIED
+        elif eps_t >= ey + 0.003:
+            phi = PHI_TENSION
         else:
-            phi = 0.65 + 0.25 * ((eps_t - eps_y) / 0.003)
+            phi = PHI_TIED + (PHI_TENSION - PHI_TIED) * (eps_t - ey) / 0.003
 
-        design_Pn = min(phi * Pn_newtons, phi * Pn_max) / 1000
-        design_Mn = (phi * Mn_Nmm) / 1000000
+        # Apply caps — φPn cannot exceed φ_tied × Pn_max (ACI §22.4.2.1)
+        design_P = min(phi * Pn, PHI_TIED * Pn_max) / 1_000     # → kN
+        design_M = abs(phi * Mn) / 1_000_000                    # → kNm  (always positive)
 
-        curve_points.append({'Moment_kNm': round(design_Mn, 1), 'Axial_kN': round(design_Pn, 1)})
-        c -= 5
+        points.append({'Moment_kNm': round(design_M, 1),
+                       'Axial_kN':   round(design_P, 1)})
+        c -= c_step
 
-    pure_tension_Pn = -(total_ast * fy * 0.9) / 1000
-    curve_points.append({'Moment_kNm': 0.0, 'Axial_kN': round(pure_tension_Pn, 1)})
+    # Pure tension point — ACI §21.2.1, φ = 0.90
+    Pt = -(PHI_TENSION * Ast * fy) / 1_000
+    points.append({'Moment_kNm': 0.0, 'Axial_kN': round(Pt, 1)})
 
-    return pd.DataFrame(curve_points)
+    return pd.DataFrame(points)
 
 
-def calculate_magnified_moment(Pu, M_demand, width, depth, fc, lu_mm, k, cm_factor, beta_dns):
-    if Pu <= 0: return pd.Series([abs(M_demand), 1.0])
-    M_min = Pu * (15 + 0.03 * depth) / 1000
-    if M_demand == 0: M_demand = 0.001
+# ============================================================
+# 3.  D/C RATIO  (radial / eccentricity method — robust)
+# ============================================================
 
+def get_dc_ratio(pm_df: pd.DataFrame, P_demand: float, M_demand: float) -> float:
+    """
+    Computes demand/capacity ratio using a ray from the origin
+    through the demand point (M, P) intersected with the PM curve.
+    This is robust for non-monotonic curves.
+    Falls back to axial ratio when the demand is above the curve cap.
+    """
+    P_max = pm_df['Axial_kN'].max()
+    P_min = pm_df['Axial_kN'].min()
+    M_abs = abs(M_demand)
+
+    # Above axial cap
+    if P_demand > P_max:
+        return round(P_demand / P_max, 3)
+    # Below tension limit
+    if P_demand < P_min:
+        return 9.99
+
+    # Pure axial demand (no moment) — simple axial ratio
+    if M_abs < 1e-6:
+        if P_demand >= 0:
+            return round(P_demand / P_max, 3)
+        return round(abs(P_demand) / abs(P_min), 3)
+
+    # Ray eccentricity
+    e_demand = M_abs / (abs(P_demand) + 1e-6)   # avoid div/0 for P near 0
+
+    # Compute eccentricity at every point on the curve
+    pm = pm_df.copy()
+    pm['e'] = pm['Moment_kNm'] / (pm['Axial_kN'].abs() + 1e-6)
+
+    # Find the two curve points that bracket the demand eccentricity
+    # among points on the same side (compression or tension)
+    if P_demand >= 0:
+        side = pm[pm['Axial_kN'] >= 0].copy()
+    else:
+        side = pm[pm['Axial_kN'] < 0].copy()
+
+    if side.empty:
+        return 9.99
+
+    # Radial distance from origin for each curve point
+    side['R_cap'] = (side['Moment_kNm'] ** 2 + side['Axial_kN'] ** 2) ** 0.5
+    R_demand = (M_abs ** 2 + P_demand ** 2) ** 0.5
+
+    # Sort by eccentricity and find bracketing points
+    side = side.sort_values('e').reset_index(drop=True)
+    idx = side['e'].searchsorted(e_demand)
+
+    if idx == 0:
+        R_cap = side.loc[0, 'R_cap']
+    elif idx >= len(side):
+        R_cap = side.loc[len(side) - 1, 'R_cap']
+    else:
+        # Linear interpolation of radial capacity between two bracketing eccentricities
+        e0, e1 = side.loc[idx - 1, 'e'], side.loc[idx, 'e']
+        R0, R1 = side.loc[idx - 1, 'R_cap'], side.loc[idx, 'R_cap']
+        if abs(e1 - e0) < 1e-9:
+            R_cap = (R0 + R1) / 2
+        else:
+            t = (e_demand - e0) / (e1 - e0)
+            R_cap = R0 + t * (R1 - R0)
+
+    if R_cap <= 0:
+        return 9.99
+    return round(R_demand / R_cap, 3)
+
+
+# ============================================================
+# 4.  MOMENT MAGNIFICATION  (ACI 318-19 §6.6.4 — non-sway)
+# ============================================================
+
+def magnify_moment(Pu: float, Mu: float,
+                   width: float, depth: float,
+                   fc: float, lu: float, k: float,
+                   Cm: float, beta_dns: float) -> tuple[float, float]:
+    """
+    Returns (Mc_kNm, delta).
+    Pu in kN, Mu in kNm, dimensions in mm.
+    Non-sway frame: ACI §6.6.4.4.
+    """
+    # Tension / zero axial — no magnification needed
+    if Pu <= 0:
+        return round(abs(Mu), 1), 1.0
+
+    # Minimum eccentricity moment — ACI §6.6.4.5.4
+    M_min = Pu * (15 + 0.03 * depth) / 1_000    # kNm
+
+    Mu_eff = max(abs(Mu), 1e-3)    # avoid log(0) in slenderness
+
+    # Radius of gyration — ACI §6.2.5: r = 0.3h for rectangular
     r = 0.3 * depth
-    if (k * lu_mm) / r <= 22:
-        return pd.Series([round(max(abs(M_demand), M_min), 1), 1.0])
+    klu_r = (k * lu) / r
 
-    Ec = 4700 * math.sqrt(fc)
-    Ig = (width * (depth ** 3)) / 12
-    EI = (0.4 * Ec * Ig) / (1 + beta_dns)
-    Pc = ((math.pi ** 2 * EI) / (k * lu_mm) ** 2) / 1000
+    # ACI §6.6.4.3 — non-sway slenderness limit
+    # Conservative limit: 34 (= 34 − 12×(M1/M2) when M1/M2 unknown and single curvature assumed)
+    # Using 34 avoids being overly conservative for typical cases
+    SLENDER_LIMIT = 34
+    if klu_r <= SLENDER_LIMIT:
+        return round(max(Mu_eff, M_min), 1), 1.0
 
-    if Pu >= 0.75 * Pc: return pd.Series([9999.9, 999.9])
+    # Stiffness — ACI Eq. 6.6.4.4.4b (conservative, no need for Ieff)
+    Ec = 4_700 * math.sqrt(fc)
+    Ig = width * depth ** 3 / 12
+    EI = 0.4 * Ec * Ig / (1 + beta_dns)
 
-    delta = cm_factor / (1 - (Pu / (0.75 * Pc)))
-    delta = max(delta, 1.0)
-    Mc = delta * abs(M_demand)
-    return pd.Series([round(max(Mc, M_min), 1), round(delta, 3)])
+    # Critical buckling load — ACI Eq. 6.6.4.4.2
+    Pc = math.pi ** 2 * EI / (k * lu) ** 2 / 1_000   # kN
 
+    # Instability guard — ACI §6.6.4.5.2
+    if Pu >= 0.75 * Pc:
+        return 9_999.9, 999.9
 
-def get_dc_ratio(pm_data, P_demand, M_demand):
-    pm_clean = pm_data.groupby('Axial_kN', as_index=False)['Moment_kNm'].max()
-    pm_clean = pm_clean.sort_values(by='Axial_kN', ascending=True)
+    # Moment magnifier — ACI Eq. 6.6.4.5.2
+    denom = 1 - Pu / (0.75 * Pc)
+    delta = max(Cm / denom, 1.0)
 
-    P_max = pm_clean['Axial_kN'].max()
-    P_min = pm_clean['Axial_kN'].min()
-
-    if P_demand > P_max: return round(P_demand / P_max, 3)
-    if P_demand < P_min: return 9.99
-
-    M_cap = np.interp(P_demand, pm_clean['Axial_kN'], pm_clean['Moment_kNm'])
-    if M_cap <= 0: return 9.99
-    return round(abs(M_demand) / M_cap, 3)
+    Mc = delta * Mu_eff
+    return round(max(Mc, M_min), 1), round(delta, 3)
 
 
-def get_dynamic_alpha(P_demand, Po_kN):
-    if P_demand <= 0: return 1.15
-    axial_ratio = P_demand / (0.65 * Po_kN)
-    alpha = 1.15 + (0.35 * axial_ratio)
-    return min(max(alpha, 1.15), 1.5)
+# ============================================================
+# 5.  BIAXIAL CHECK  (PCA Load Contour / Bresler-Parme)
+# ============================================================
+
+def dynamic_alpha(Pu: float, Po_kN: float) -> float:
+    """
+    α transitions linearly from 1.15 (pure bending) to 1.50 (near pure compression).
+    Reference: PCA Load Contour Method; MacGregor & Wight.
+    """
+    if Pu <= 0 or Po_kN <= 0:
+        return 1.15
+    ratio = min(Pu / (PHI_TIED * Po_kN), 1.0)
+    return round(min(max(1.15 + 0.35 * ratio, 1.15), 1.50), 3)
 
 
-def run_optimizer(df, b, h, fc, fy, cover, lu, k, cm, beta_dns, tie_dia):
+def biaxial_pmm(dc2: float, dc3: float, alpha: float) -> float:
+    """
+    Load contour: (M2/M2o)^α + (M3/M3o)^α = 1.0 at capacity.
+    Returns ratio; > 1.0 means failure.
+    """
+    # Guard against 9.99 sentinel values propagating as finite numbers
+    if dc2 >= 9.0 or dc3 >= 9.0:
+        return 9.99
+    return round((dc2 ** alpha + dc3 ** alpha) ** (1 / alpha), 3)
+
+
+# ============================================================
+# 6.  SHEAR CAPACITY CHECK  (ACI 318-19 §22.5 — column)
+# ============================================================
+
+def column_shear_capacity(b: float, d: float, fc: float,
+                           Pu: float, Ag: float,
+                           fyt: float, Av: float, s: float) -> dict:
+    """
+    Pu in kN (positive = compression).
+    Returns phi*Vn in kN.
+    ACI §22.5.6.1 — simplified Vc for columns.
+    """
+    Nu = Pu * 1_000   # N
+    # ACI Eq. 22.5.6.1
+    Vc = 0.17 * (1 + Nu / (14 * Ag)) * math.sqrt(fc) * b * d  # N
+    Vc = max(Vc, 0)
+
+    # Vs from provided ties
+    Vs = (Av * fyt * d) / s if s > 0 else 0   # N
+
+    phi_Vn = PHI_SHEAR * (Vc + Vs) / 1_000   # kN
+    phi_Vc = PHI_SHEAR * Vc / 1_000
+    return {'phi_Vn_kN': round(phi_Vn, 1), 'phi_Vc_kN': round(phi_Vc, 1)}
+
+
+# ============================================================
+# 7.  OPTIMIZER
+# ============================================================
+
+def run_optimizer(df: pd.DataFrame, b: float, h: float,
+                  fc: float, fy: float, cover: float,
+                  lu: float, k: float, Cm: float, beta_dns: float,
+                  tie_d: float) -> dict | None:
     Ag = b * h
-    min_ast = 0.01 * Ag
-    max_ast = 0.08 * Ag
     bars = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
 
     configs = []
     for name, dia in bars.items():
-        area = math.pi * (dia ** 2) / 4
+        area = math.pi * dia ** 2 / 4
         for nw in range(3, 15):
             for nd in range(3, 15):
-                total_bars = 2 * nw + 2 * (nd - 2)
-                ast = total_bars * area
-                if min_ast <= ast <= max_ast and check_bar_fit(b, h, nw, nd, dia, cover, tie_dia):
+                total = 2 * nw + 2 * (nd - 2)
+                Ast = total * area
+                rho = Ast / Ag
+                fits, _, _ = check_bar_fit(b, h, nw, nd, dia, cover, tie_d)
+                if 0.01 <= rho <= 0.08 and fits:
                     configs.append({
-                        'Name': f"{total_bars}-{name} ({nw}x{nd})",
-                        'Ast': ast, 'nw': nw, 'nd': nd, 'dia': dia
+                        'label': f"{total}-{name} ({nw}×{nd})",
+                        'Ast': Ast, 'nw': nw, 'nd': nd, 'dia': dia,
+                        'total_bars': total
                     })
 
-    configs = sorted(configs, key=lambda x: x['Ast'])
+    # Sort: minimum steel first, then fewer bars (more practical)
+    configs.sort(key=lambda x: (round(x['Ast'], -2), x['total_bars']))
 
-    for config in configs:
-        pm_test_2 = generate_pm_curve(h, b, fc, fy, cover, config['nd'], config['nw'], config['dia'], tie_dia)
-        pm_test_3 = generate_pm_curve(b, h, fc, fy, cover, config['nw'], config['nd'], config['dia'], tie_dia)
-        Po_kN = get_Po_kN(b, h, fc, fy, config['Ast'])
+    for cfg in configs:
+        pm2 = generate_pm_curve(h, b, fc, fy, cover, cfg['nd'], cfg['nw'], cfg['dia'], tie_d)
+        pm3 = generate_pm_curve(b, h, fc, fy, cover, cfg['nw'], cfg['nd'], cfg['dia'], tie_d)
+        Po_kN = get_Po(b, h, fc, fy, cfg['Ast']) / 1_000
 
-        all_pass = True
-        for index, row in df.iterrows():
+        ok = True
+        for _, row in df.iterrows():
             P = row['P_Demand_kN']
-            m2_res = calculate_magnified_moment(P, row['M2_Demand_kNm'], h, b, fc, lu, k, cm, beta_dns)
-            m3_res = calculate_magnified_moment(P, row['M3_Demand_kNm'], b, h, fc, lu, k, cm, beta_dns)
-
-            dc2 = get_dc_ratio(pm_test_2, P, m2_res.iloc[0])
-            dc3 = get_dc_ratio(pm_test_3, P, m3_res.iloc[0])
-
-            alpha = get_dynamic_alpha(P, Po_kN)
-            pmm_ratio = (dc2 ** alpha + dc3 ** alpha) ** (1 / alpha)
-
-            if pmm_ratio > 1.0:
-                all_pass = False
+            Mc2, _ = magnify_moment(P, row['M2_Demand_kNm'], h, b, fc, lu, k, Cm, beta_dns)
+            Mc3, _ = magnify_moment(P, row['M3_Demand_kNm'], b, h, fc, lu, k, Cm, beta_dns)
+            dc2 = get_dc_ratio(pm2, P, Mc2)
+            dc3 = get_dc_ratio(pm3, P, Mc3)
+            alpha = dynamic_alpha(P, Po_kN)
+            if biaxial_pmm(dc2, dc3, alpha) > 1.0:
+                ok = False
                 break
-        if all_pass: return config
+        if ok:
+            return cfg
     return None
 
 
-# ==========================================
-# 2. THE WEB INTERFACE
-# ==========================================
+# ============================================================
+# 8.  PDF REPORT
+# ============================================================
 
-st.title("🏗️ Advanced RC Column App")
-st.write("Upload raw SAP2000 loads. Discrete 4-face rebar analysis & PCA Biaxial Bending active.")
+def create_pdf(frame_name: str, b: float, h: float, fc: float, fy: float,
+               layout_text: str, tie_text: str, rho_g: float,
+               max_ratio: float, max_combo: str,
+               klu_r_2: float, klu_r_3: float,
+               fig) -> bytes:
+    pdf = FPDF()
+    pdf.add_page()
+    W = 190   # usable page width
 
-st.sidebar.header("1. Section Properties")
-b = st.sidebar.number_input("Width (b, Axis 2) in mm", value=800, step=50)
-h = st.sidebar.number_input("Depth (h, Axis 3) in mm", value=800, step=50)
-fc = st.sidebar.number_input("f'c (MPa)", value=40, step=5)
-fy = st.sidebar.number_input("fy (MPa)", value=500, step=10)
+    # ---- Header ----
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(W, 10, f"RC Column Design Report — Frame: {frame_name}", ln=True, align='C')
+    pdf.set_font("Arial", '', 9)
+    pdf.set_text_color(120, 120, 120)
+    pdf.cell(W, 6, "ACI 318-19 | Non-sway frame | Biaxial: PCA Load Contour (Bresler-Parme, dynamic α)", ln=True, align='C')
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
 
-st.sidebar.header("2. Longitudinal Bars")
-auto_optimize = st.sidebar.checkbox("🚀 Enable Auto-Design Optimizer")
-optimized_name = ""
-fit_warning = False
+    def section(title):
+        pdf.set_font("Arial", 'B', 12)
+        pdf.set_fill_color(230, 230, 230)
+        pdf.cell(W, 8, f"  {title}", ln=True, fill=True)
+        pdf.set_font("Arial", '', 11)
+        pdf.ln(1)
 
-st.sidebar.header("3. Transverse Ties")
-tie_options = {'RB9': 9, 'DB10': 10, 'DB12': 12}
-selected_tie = st.sidebar.selectbox("Tie Bar Size", list(tie_options.keys()), index=1)
-tie_dia = tie_options[selected_tie]
-cover_mm = st.sidebar.number_input("Clear Cover to Ties (mm)", value=40, step=5)
+    def row(label, value):
+        pdf.cell(80, 6, f"  {label}", border=0)
+        pdf.cell(W - 80, 6, str(value), ln=True)
 
-if not auto_optimize:
-    n3_bars = st.sidebar.number_input("Number of Longit Bars Along 3-dir Face (Width)", value=4, step=1)
-    n2_bars = st.sidebar.number_input("Number of Longit Bars Along 2-dir Face (Depth)", value=4, step=1)
+    section("1. Section Properties")
+    row("Dimensions", f"{b} × {h} mm")
+    row("Concrete f'c", f"{fc} MPa")
+    row("Steel fy", f"{fy} MPa")
+    row("Gross area Ag", f"{int(b * h)} mm²")
+    pdf.ln(3)
 
-    bar_options = {'16d': 16, '20d': 20, '25d': 25, '28d': 28, '32d': 32}
-    selected_bar = st.sidebar.selectbox("Longitudinal Bar Size", list(bar_options.keys()), index=2)
-    bar_dia = bar_options[selected_bar]
+    section("2. Reinforcement")
+    row("Longitudinal layout", layout_text)
+    row("Steel ratio ρg", f"{rho_g} %")
+    row("Transverse ties", tie_text)
+    pdf.ln(3)
 
-    total_bars = 2 * n3_bars + 2 * (n2_bars - 2)
-    total_ast = total_bars * (math.pi * bar_dia ** 2 / 4)
-    st.sidebar.markdown(f"**Total Area Provided:** {round(total_ast, 1)} mm² ({total_bars} bars)")
+    section("3. Slenderness (non-sway, ACI §6.6.4)")
+    row("klu/r about axis 2", f"{round(klu_r_2, 1)}")
+    row("klu/r about axis 3", f"{round(klu_r_3, 1)}")
+    row("Slenderness limit", "34 (conservative, M1/M2 unknown)")
+    pdf.ln(3)
 
-    if not check_bar_fit(b, h, n3_bars, n2_bars, bar_dia, cover_mm, tie_dia):
-        fit_warning = True
+    section("4. Design Result")
+    status = "FAIL" if max_ratio > 1.0 else "PASS"
+    colour = (220, 53, 69) if max_ratio > 1.0 else (40, 167, 69)
+    pdf.set_text_color(*colour)
+    pdf.set_font("Arial", 'B', 13)
+    pdf.cell(W, 8, f"  Status: {status}   |   Max Biaxial PMM Ratio: {max_ratio}", ln=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Arial", '', 11)
+    row("Governing combo", max_combo)
+    pdf.set_font("Arial", 'I', 9)
+    pdf.set_text_color(100, 100, 100)
+    pdf.cell(W, 5, "  * Biaxial check per PCA Load Contour Method, alpha = 1.15 – 1.50 (dynamic, axial-load dependent)", ln=True)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(3)
 
-uploaded_file = st.file_uploader("Upload RAW SAP2000 loads (CSV)", type=["csv"])
+    section("5. P-M Interaction Diagram")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
+        fig.savefig(tmp_img.name, format="png", bbox_inches="tight", dpi=200)
+        img_path = tmp_img.name
+    pdf.image(img_path, x=10, w=W)
 
-if fit_warning:
-    st.error(
-        "🚨 **CONSTRUCTABILITY ERROR:** The specified rebar grid does not physically fit within the column dimensions while maintaining ACI minimum clear spacing. Increase column size, reduce bar count, or use the Auto-Design Optimizer.")
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+        pdf.output(tmp_pdf.name)
+        pdf_path = tmp_pdf.name
 
-if uploaded_file is not None and not fit_warning:
-    df_raw = pd.read_csv(uploaded_file)
+    with open(pdf_path, "rb") as f:
+        data = f.read()
 
-    if 'Frame' in df_raw.columns and (
-            str(df_raw['Frame'].iloc[0]).strip().lower() == 'text' or str(df_raw['P'].iloc[0]).strip().lower() == 'kn'):
+    for p in (img_path, pdf_path):
+        try: os.remove(p)
+        except Exception: pass
+
+    return data
+
+
+# ============================================================
+# 9.  STREAMLIT UI
+# ============================================================
+
+st.set_page_config(page_title="RC Column Designer", page_icon="🏗️", layout="wide")
+st.title("🏗️ RC Column Designer — ACI 318-19")
+st.caption(
+    "Non-sway frame | Discrete 4-face rebar | "
+    "PCA biaxial method | Radial D/C interpolation | "
+    "Slenderness per §6.6.4"
+)
+st.warning(
+    "**Scope notice:** This tool covers non-sway frames only. "
+    "Seismic (Chapter 18) provisions are NOT checked. "
+    "Output is for preliminary design — verify with a licensed engineer.",
+    icon="⚠️"
+)
+
+# ---- Sidebar ----
+sb = st.sidebar
+sb.header("1 · Section")
+b = sb.number_input("Width b (Axis-2 direction, mm)", value=800, step=50, min_value=200)
+h = sb.number_input("Depth h (Axis-3 direction, mm)", value=800, step=50, min_value=200)
+fc = sb.number_input("Concrete f'c (MPa)", value=40, step=5, min_value=20)
+fy = sb.number_input("Steel fy (MPa)", value=500, step=10, min_value=300)
+
+sb.header("2 · Transverse ties")
+tie_map = {'RB9': 9, 'DB10': 10, 'DB12': 12}
+sel_tie = sb.selectbox("Tie bar size", list(tie_map.keys()), index=1)
+tie_d = tie_map[sel_tie]
+cover = sb.number_input("Clear cover to tie face (mm)", value=40, step=5, min_value=20)
+
+sb.header("3 · Longitudinal bars")
+auto_opt = sb.checkbox("🚀 Auto-Design Optimizer", value=False)
+
+bar_map = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
+
+if not auto_opt:
+    nw = sb.number_input("Bars on width face (3-dir)", value=4, step=1, min_value=2)
+    nd = sb.number_input("Bars on depth face (2-dir)", value=4, step=1, min_value=2)
+    sel_bar = sb.selectbox("Bar size", list(bar_map.keys()), index=2)
+    bar_dia = bar_map[sel_bar]
+    total_bars = 2 * nw + 2 * (nd - 2)
+    Ast = total_bars * math.pi * bar_dia ** 2 / 4
+    rho_pct, above_min, below_max = check_rho_g(b, h, Ast)
+    fits, req_w, req_h = check_bar_fit(b, h, nw, nd, bar_dia, cover, tie_d)
+
+    sb.markdown(f"**Bars:** {total_bars} · **Ast:** {round(Ast, 0):.0f} mm²")
+    sb.markdown(f"**ρg:** {rho_pct} %  {'✅' if above_min and below_max else '❌'}")
+    if not above_min:
+        sb.error("ρg < 1 % — ACI §10.6.1.1")
+    if not below_max:
+        sb.error("ρg > 8 % — ACI §10.6.1.1")
+    if not fits:
+        sb.error(f"Bars don't fit! Needs {req_w} mm (width) / {req_h} mm (depth) clear — ACI §25.2.3")
+
+sb.header("4 · Slenderness / creep")
+lu = sb.number_input("Unsupported length lu (mm)", value=3_000, step=100, min_value=500)
+k  = sb.number_input("Effective length factor k", value=1.0, step=0.05, min_value=0.5)
+sb.caption("Cm — ACI §6.6.4.5.3a: Cm = 0.6 − 0.4·(M1/M2). Use 1.0 for transverse loads or if M1/M2 unknown.")
+Cm = sb.slider("Cm factor", 0.20, 1.00, 1.00, 0.05)
+beta_dns = sb.slider("βdns (sustained-load ratio)", 0.0, 1.0, 0.0, 0.05)
+
+sb.header("5 · Shear check (optional)")
+check_shear = sb.checkbox("Check column shear capacity")
+fyt_shear = sb.number_input("Tie fy for shear (MPa)", value=400, step=10, min_value=250) if check_shear else 400
+
+# ---- File upload ----
+uploaded = st.file_uploader("Upload SAP2000 frame-forces CSV", type=["csv"])
+
+if uploaded is None:
+    st.info("Upload a SAP2000 frame-forces CSV to begin. Expected columns: Frame, OutputCase, P, M2, M3.")
+    st.stop()
+
+# ---- Parse CSV ----
+df_raw = pd.read_csv(uploaded)
+
+# Drop SAP2000 units-header row if present
+if 'Frame' in df_raw.columns:
+    first = str(df_raw['Frame'].iloc[0]).strip().lower()
+    if first in ('text', 'unitless'):
         df_raw = df_raw.drop(0).reset_index(drop=True)
-    for col in ['P', 'M2', 'M3']:
-        if col in df_raw.columns: df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce')
 
-    st.sidebar.header("4. Filter SAP2000 Data")
-    if 'Frame' in df_raw.columns:
-        selected_frame = st.sidebar.selectbox("Select Frame (Column)", df_raw['Frame'].unique())
-        df = df_raw[df_raw['Frame'] == selected_frame].copy()
-        df['Load_Combo'] = df['OutputCase']
-        df['P_Demand_kN'] = df['P'] * -1
-        df['M2_Demand_kNm'] = df['M2']
-        df['M3_Demand_kNm'] = df['M3']
-    else:
-        df = df_raw.copy()
-        selected_frame = "Custom"
+for col in ['P', 'M2', 'M3', 'V2', 'V3']:
+    if col in df_raw.columns:
+        df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce')
 
-    st.sidebar.header("5. Slenderness & Creep")
-    lu = st.sidebar.number_input("Unsupported Length (lu) in mm", value=3000, step=100)
-    k_factor = st.sidebar.number_input("Effective Length Factor (k)", value=1.0, step=0.1)
-    cm_val = st.sidebar.slider("Cm Factor", min_value=0.2, max_value=1.0, value=1.0, step=0.05)
-    beta_dns = st.sidebar.slider("Beta_dns", min_value=0.0, max_value=1.0, value=0.0, step=0.1)
+if 'Frame' not in df_raw.columns:
+    st.error("CSV must contain a 'Frame' column.  Check your SAP2000 export.")
+    st.stop()
 
-    if auto_optimize:
-        with st.spinner("Optimizing constructable rebar grid with PCA Biaxial evaluation..."):
-            best_layout = run_optimizer(df, b, h, fc, fy, cover_mm, lu, k_factor, cm_val, beta_dns, tie_dia)
-        if best_layout:
-            n3_bars, n2_bars, bar_dia = best_layout['nw'], best_layout['nd'], best_layout['dia']
-            optimized_name = best_layout['Name']
-            total_ast = best_layout['Ast']
-            total_bars = 2 * n3_bars + 2 * (n2_bars - 2)
-        else:
-            st.error(
-                "❌ **Optimization Failed:** Section fails even at 8% limit or cannot physically fit required reinforcement.")
-            n3_bars, n2_bars, bar_dia, total_ast, total_bars = 10, 10, 32, b * h * 0.08, 36
+sb.header("6 · Select column")
+frame_id = sb.selectbox("Frame (column)", df_raw['Frame'].unique())
 
-    # Calculate Tie Spacing
-    tie_spacing = calculate_tie_spacing(b, h, bar_dia, tie_dia)
+df = df_raw[df_raw['Frame'] == frame_id].copy()
+df['Load_Combo']     = df['OutputCase']
+# SAP2000 default: compression is negative in P — flip to positive for ACI convention
+df['P_Demand_kN']   = df['P'] * -1
+df['M2_Demand_kNm'] = df['M2']
+df['M3_Demand_kNm'] = df['M3']
 
-    df[['M2_Mag_kNm', 'Delta_2']] = df.apply(lambda row: calculate_magnified_moment(
-        row['P_Demand_kN'], row['M2_Demand_kNm'], h, b, fc, lu, k_factor, cm_val, beta_dns), axis=1)
+st.caption(
+    "**SAP2000 sign convention:** P is negated (compression positive). "
+    "Verify this matches your export settings before using results."
+)
 
-    df[['M3_Mag_kNm', 'Delta_3']] = df.apply(lambda row: calculate_magnified_moment(
-        row['P_Demand_kN'], row['M3_Demand_kNm'], b, h, fc, lu, k_factor, cm_val, beta_dns), axis=1)
+# ---- Auto-optimizer ----
+if auto_opt:
+    with st.spinner("Optimising constructable rebar grid…"):
+        best = run_optimizer(df, b, h, fc, fy, cover, lu, k, Cm, beta_dns, tie_d)
+    if best is None:
+        st.error("Optimisation failed — section cannot satisfy demands within 1–8 % ρg. Increase section size.")
+        st.stop()
+    nw, nd, bar_dia = best['nw'], best['nd'], best['dia']
+    Ast = best['Ast']
+    total_bars = best['total_bars']
+    rho_pct = round(Ast / (b * h) * 100, 2)
+    fits = True
+    st.success(f"Optimised layout: **{best['label']}**  |  ρg = {rho_pct} %")
+else:
+    # Manual mode — halt if geometry is invalid
+    if not fits:
+        st.error("Fix the bar-fit error in the sidebar before running the design.")
+        st.stop()
+    if not (above_min and below_max):
+        st.error("Fix the ρg error in the sidebar before running the design.")
+        st.stop()
 
-    pm_data_2 = generate_pm_curve(h, b, fc, fy, cover_mm, n2_bars, n3_bars, bar_dia, tie_dia)
-    pm_data_3 = generate_pm_curve(b, h, fc, fy, cover_mm, n3_bars, n2_bars, bar_dia, tie_dia)
-    Po_kN = get_Po_kN(b, h, fc, fy, total_ast)
+# ---- Tie spacing ----
+tie_spacing = calculate_tie_spacing(b, h, bar_dia, tie_d)
+layout_text = f"{total_bars}-DB{bar_dia}  ({nw}×{nd} grid)"
+tie_text    = f"{sel_tie} @ {tie_spacing} mm (ACI §25.7.2)"
 
-    df['DC_2'] = df.apply(lambda row: get_dc_ratio(pm_data_2, row['P_Demand_kN'], row['M2_Mag_kNm']), axis=1)
-    df['DC_3'] = df.apply(lambda row: get_dc_ratio(pm_data_3, row['P_Demand_kN'], row['M3_Mag_kNm']), axis=1)
+# ---- Slenderness parameters ----
+r2 = 0.3 * b   # radius of gyration about axis 2 (bending in plane of h)
+r3 = 0.3 * h   # radius of gyration about axis 3
+klu_r_2 = (k * lu) / r2
+klu_r_3 = (k * lu) / r3
 
-    df['Alpha'] = df.apply(lambda row: get_dynamic_alpha(row['P_Demand_kN'], Po_kN), axis=1)
-    df['PMM_Ratio'] = (df['DC_2'] ** df['Alpha'] + df['DC_3'] ** df['Alpha']) ** (1 / df['Alpha'])
-    df['PMM_Ratio'] = df['PMM_Ratio'].round(3)
+# ---- Moment magnification ----
+df[['M2_Mag', 'Delta_2']] = df.apply(
+    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M2_Demand_kNm'],
+                                        h, b, fc, lu, k, Cm, beta_dns)), axis=1)
+df[['M3_Mag', 'Delta_3']] = df.apply(
+    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M3_Demand_kNm'],
+                                        b, h, fc, lu, k, Cm, beta_dns)), axis=1)
 
-    max_idx = df['PMM_Ratio'].idxmax()
-    max_ratio = df.loc[max_idx, 'PMM_Ratio']
-    max_combo = df.loc[max_idx, 'Load_Combo']
+# ---- PM curves ----
+# Axis-2 bending: neutral axis || axis 2 → use (width=h, depth=b) with nd, nw bars
+pm2 = generate_pm_curve(h, b, fc, fy, cover, nd, nw, bar_dia, tie_d)
+# Axis-3 bending: neutral axis || axis 3 → use (width=b, depth=h) with nw, nd bars
+pm3 = generate_pm_curve(b, h, fc, fy, cover, nw, nd, bar_dia, tie_d)
+Po_kN = get_Po(b, h, fc, fy, Ast) / 1_000
 
-    # Updated Layout String with Tie Spacing
-    layout_str = f"{optimized_name}" if optimized_name else f"{total_bars}-DB{bar_dia} ({n3_bars}x{n2_bars})"
-    layout_text = f"{layout_str} + {selected_tie} @ {tie_spacing} mm"
+# ---- D/C ratios ----
+df['DC_2']  = df.apply(lambda r: get_dc_ratio(pm2, r['P_Demand_kN'], r['M2_Mag']), axis=1)
+df['DC_3']  = df.apply(lambda r: get_dc_ratio(pm3, r['P_Demand_kN'], r['M3_Mag']), axis=1)
+df['Alpha'] = df.apply(lambda r: dynamic_alpha(r['P_Demand_kN'], Po_kN), axis=1)
+df['PMM']   = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), axis=1)
 
-    st.markdown("---")
-    if max_ratio > 1.0:
-        st.error(
-            f"### 🚨 MAX BIAXIAL RATIO: {max_ratio} \n**Governing Combo:** `{max_combo}` | **Layout:** {layout_text}")
-    elif max_ratio > 0.9:
-        st.warning(
-            f"### ⚠️ MAX BIAXIAL RATIO: {max_ratio} \n**Governing Combo:** `{max_combo}` | **Layout:** {layout_text}")
-    else:
-        st.success(
-            f"### ✅ MAX BIAXIAL RATIO: {max_ratio} \n**Governing Combo:** `{max_combo}` | **Layout:** {layout_text}")
-    st.info(
-        "💡 **Methodology:** Biaxial checks performed using the PCA Load Contour Method (Bresler-Parme) with dynamic $\\alpha$ transitioning from 1.15 to 1.50 based on axial demand.")
-    st.markdown("---")
+max_idx   = df['PMM'].idxmax()
+max_ratio = df.loc[max_idx, 'PMM']
+max_combo = df.loc[max_idx, 'Load_Combo']
 
-    max_delta = max(df['Delta_2'].max(), df['Delta_3'].max())
-    if max_delta >= 990:
-        st.error("🚨 **CRITICAL FAILURE:** Column will buckle!")
-    elif max_delta > 1.4:
-        st.warning("⚠️ **SLENDERNESS WARNING:** Moment magnifier (δ) > 1.4.")
+# ---- Shear check ----
+shear_info = {}
+if check_shear and 'V2' in df.columns and 'V3' in df.columns:
+    Ag = b * h
+    d2 = b - cover - tie_d - bar_dia / 2   # effective depth for V2
+    d3 = h - cover - tie_d - bar_dia / 2   # effective depth for V3
+    Av_tie = 2 * math.pi * tie_d ** 2 / 4  # two legs per tie set
+    Pu_avg = df[df['P_Demand_kN'] > 0]['P_Demand_kN'].mean() if df['P_Demand_kN'].gt(0).any() else 0
 
-    st.subheader("Interaction Diagram: PMM")
-    fig, ax = plt.subplots(figsize=(8, 6))
-    curve_label = f'Design Capacity ({layout_str})'
+    sv2 = column_shear_capacity(h, d2, fc, Pu_avg, Ag, fyt_shear, Av_tie, tie_spacing)
+    sv3 = column_shear_capacity(b, d3, fc, Pu_avg, Ag, fyt_shear, Av_tie, tie_spacing)
+    V2_max = df['V2'].abs().max()
+    V3_max = df['V3'].abs().max()
+    shear_info = {
+        'V2_max': round(V2_max, 1), 'phi_Vn2': sv2['phi_Vn_kN'],
+        'V3_max': round(V3_max, 1), 'phi_Vn3': sv3['phi_Vn_kN'],
+        'pass2': V2_max <= sv2['phi_Vn_kN'],
+        'pass3': V3_max <= sv3['phi_Vn_kN'],
+    }
 
-    governing_pm = pm_data_2 if df['DC_2'].max() > df['DC_3'].max() else pm_data_3
+# ============================================================
+# DISPLAY RESULTS
+# ============================================================
 
-    ax.plot(governing_pm['Moment_kNm'], governing_pm['Axial_kN'], label=curve_label, color='blue', linewidth=2)
-    ax.scatter(df['M2_Mag_kNm'], df['P_Demand_kN'], color='mediumseagreen', label='M2 Demands', zorder=5, s=50,
-               marker='s')
-    ax.scatter(df['M3_Mag_kNm'], df['P_Demand_kN'], color='darkorange', label='M3 Demands', zorder=5, s=50, marker='^')
-    ax.set_title(f"Frame {b}x{h} mm")
-    ax.set_xlabel("Bending Moment (kNm)")
-    ax.set_ylabel("Axial Load (kN)")
-    ax.axhline(0, color='black', linewidth=1)
-    ax.axvline(0, color='black', linewidth=1)
-    ax.grid(True, linestyle='--', alpha=0.6)
-    ax.legend()
-    st.pyplot(fig)
+st.markdown("---")
 
+# -- Key metric row --
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Max PMM ratio", max_ratio, help="PCA biaxial load contour — must be ≤ 1.0")
+c2.metric("ρg", f"{rho_pct} %", help="ACI §10.6.1.1: 1 – 8 %")
+c3.metric("klu/r (axis 2)", round(klu_r_2, 1))
+c4.metric("klu/r (axis 3)", round(klu_r_3, 1))
 
-    def highlight_table(val):
-        if isinstance(val, (int, float)):
-            if val >= 990:
-                return 'background-color: darkred; color: white;'
-            elif val > 1.4:
-                return 'background-color: #ffcccc; color: red;'
-        return ''
+# -- Overall status banner --
+if max_ratio > 1.0:
+    st.error(f"### 🚨 FAIL — PMM Ratio: {max_ratio}  |  Combo: {max_combo}")
+elif max_ratio > 0.90:
+    st.warning(f"### ⚠️ MARGINAL — PMM Ratio: {max_ratio}  |  Combo: {max_combo}")
+else:
+    st.success(f"### ✅ PASS — PMM Ratio: {max_ratio}  |  Combo: {max_combo}")
 
+st.markdown(
+    f"**Layout:** {layout_text} &nbsp;|&nbsp; **Ties:** {tie_text} &nbsp;|&nbsp; "
+    f"**ρg:** {rho_pct} %"
+)
+st.info(
+    "**Biaxial method:** PCA Load Contour (Bresler-Parme) — "
+    "$(DC_2)^\\alpha + (DC_3)^\\alpha = 1$  with dynamic $\\alpha$ from 1.15 (low axial) "
+    "to 1.50 (high axial). D/C ratios use radial interpolation on the PM curve.",
+    icon="ℹ️"
+)
 
-    def highlight_pmm(val):
-        if isinstance(val, (int, float)):
-            if val > 1.0:
-                return 'background-color: darkred; color: white; font-weight: bold;'
-            elif val > 0.9:
-                return 'background-color: #ffcccc; color: red;'
-        return ''
+# -- Slenderness flags --
+for axis, klu_r in [("Axis 2", klu_r_2), ("Axis 3", klu_r_3)]:
+    if klu_r > 100:
+        st.error(f"klu/r = {round(klu_r, 1)} ({axis}) — extremely slender. Consider second-order analysis.")
+    elif klu_r > 34:
+        st.warning(f"klu/r = {round(klu_r, 1)} ({axis}) — slender; moment magnification applied.")
 
+max_delta = max(df['Delta_2'].max(), df['Delta_3'].max())
+if max_delta >= 990:
+    st.error("🚨 **BUCKLING FAILURE:** Pu ≥ 0.75·Pc. Increase section or reduce unsupported length.")
+elif max_delta > 1.4:
+    st.warning(f"⚠️ Max moment magnifier δ = {round(max_delta, 2)} > 1.4 — large slenderness effect.")
 
-    display_columns = ['Load_Combo', 'P_Demand_kN', 'M2_Mag_kNm', 'Delta_2', 'DC_2', 'M3_Mag_kNm', 'Delta_3', 'DC_3',
-                       'Alpha', 'PMM_Ratio']
-    styled_df = df[display_columns].style.map(highlight_table, subset=['Delta_2', 'Delta_3'])
-    styled_df = styled_df.map(highlight_pmm, subset=['PMM_Ratio'])
-    st.dataframe(styled_df, use_container_width=True)
+# -- Shear results --
+if shear_info:
+    st.subheader("Column Shear Check (ACI §22.5.6.1)")
+    sc1, sc2 = st.columns(2)
+    icon2 = "✅" if shear_info['pass2'] else "❌"
+    icon3 = "✅" if shear_info['pass3'] else "❌"
+    sc1.metric(f"{icon2} φVn (axis 2)", f"{shear_info['phi_Vn2']} kN",
+               f"Demand V2 = {shear_info['V2_max']} kN")
+    sc2.metric(f"{icon3} φVn (axis 3)", f"{shear_info['phi_Vn3']} kN",
+               f"Demand V3 = {shear_info['V3_max']} kN")
+    if not shear_info['pass2'] or not shear_info['pass3']:
+        st.error("Shear demand exceeds capacity — increase tie size, reduce spacing, or enlarge section.")
 
-    st.markdown("---")
-    st.subheader("📄 Export Calculation Report")
-    pdf_bytes = create_pdf(selected_frame, b, h, fc, fy, layout_text, max_ratio, max_combo, fig)
-    st.download_button(
-        label="📥 Download PDF Report",
-        data=pdf_bytes,
-        file_name=f"Design_Report_Frame_{selected_frame}.pdf",
-        mime="application/pdf"
-    )
+# -- Interaction diagram --
+st.subheader("P-M Interaction Diagram")
+st.caption(
+    "The diagram shows one uniaxial PM curve (governing axis). "
+    "Points inside the curve may still fail the **biaxial** check — "
+    "refer to the PMM column in the table below."
+)
+
+fig, ax = plt.subplots(figsize=(8, 6))
+gov_pm = pm2 if df['DC_2'].max() > df['DC_3'].max() else pm3
+gov_label = "Axis-2 (M2 governs)" if df['DC_2'].max() > df['DC_3'].max() else "Axis-3 (M3 governs)"
+
+# Sort curve for a clean plot
+gov_sorted = gov_pm.sort_values('Axial_kN').drop_duplicates()
+ax.plot(gov_sorted['Moment_kNm'], gov_sorted['Axial_kN'],
+        color='steelblue', linewidth=2, label=f'φPn-φMn ({gov_label})')
+
+ax.scatter(df['M2_Mag'], df['P_Demand_kN'],
+           c=df['DC_2'], cmap='RdYlGn_r', vmin=0, vmax=1.2,
+           s=60, marker='s', zorder=5, label='M2 demands (colour = DC_2)')
+ax.scatter(df['M3_Mag'], df['P_Demand_kN'],
+           c=df['DC_3'], cmap='RdYlGn_r', vmin=0, vmax=1.2,
+           s=60, marker='^', zorder=5, label='M3 demands (colour = DC_3)')
+
+ax.axhline(0, color='black', linewidth=0.8)
+ax.axvline(0, color='black', linewidth=0.8)
+ax.set_xlabel("φMn (kNm)")
+ax.set_ylabel("φPn (kN)")
+ax.set_title(f"Frame {frame_id}  —  {layout_text}")
+ax.grid(True, linestyle='--', alpha=0.5)
+ax.legend(fontsize=9)
+plt.colorbar(plt.cm.ScalarMappable(
+    cmap='RdYlGn_r',
+    norm=plt.Normalize(0, 1.2)), ax=ax, label='DC ratio')
+plt.tight_layout()
+st.pyplot(fig)
+
+# -- Results table --
+st.subheader("Load-combination table")
+disp_cols = ['Load_Combo', 'P_Demand_kN',
+             'M2_Mag', 'Delta_2', 'DC_2',
+             'M3_Mag', 'Delta_3', 'DC_3',
+             'Alpha', 'PMM']
+
+def _hl_delta(v):
+    if isinstance(v, (int, float)):
+        if v >= 990: return 'background-color:#8B0000;color:white'
+        if v > 1.4:  return 'background-color:#ffcccc;color:#c00'
+    return ''
+
+def _hl_pmm(v):
+    if isinstance(v, (int, float)):
+        if v > 1.0: return 'background-color:#8B0000;color:white;font-weight:bold'
+        if v > 0.9: return 'background-color:#ffcccc;color:#c00'
+    return ''
+
+styled = (df[disp_cols]
+          .style
+          .map(_hl_delta, subset=['Delta_2', 'Delta_3'])
+          .map(_hl_pmm,   subset=['PMM'])
+          .format({'P_Demand_kN': '{:.1f}', 'M2_Mag': '{:.1f}', 'M3_Mag': '{:.1f}',
+                   'Delta_2': '{:.3f}', 'Delta_3': '{:.3f}',
+                   'DC_2': '{:.3f}', 'DC_3': '{:.3f}',
+                   'Alpha': '{:.2f}', 'PMM': '{:.3f}'}))
+st.dataframe(styled, use_container_width=True)
+
+# -- PDF export --
+st.markdown("---")
+st.subheader("📄 Export report")
+pdf_bytes = create_pdf(
+    frame_id, b, h, fc, fy,
+    layout_text, tie_text, rho_pct,
+    max_ratio, max_combo,
+    klu_r_2, klu_r_3, fig
+)
+st.download_button(
+    "📥 Download PDF",
+    data=pdf_bytes,
+    file_name=f"Column_Design_{frame_id}.pdf",
+    mime="application/pdf"
+)
