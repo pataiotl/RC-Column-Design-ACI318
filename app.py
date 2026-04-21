@@ -123,8 +123,10 @@ def generate_pm_curve(width: float, depth: float,
         Pn = Cc + Fs
         Mn = Mc + Ms          # can be negative for some layers — correct by sign
 
-        # eps_t at extreme tension layer
-        eps_t = ECU * (c - layers[-1]['d']) / c
+        # --- CRITICAL BUG FIX ---
+        # eps_t at extreme tension layer. Evaluated as (d - c) to ensure tension 
+        # produces a positive strain value, allowing the phi factor to transition.
+        eps_t = ECU * (layers[-1]['d'] - c) / c
 
         # phi — ACI Table 21.2.2 (column bracket)
         if eps_t <= ey:
