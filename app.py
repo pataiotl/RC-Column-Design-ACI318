@@ -715,36 +715,47 @@ st.caption(
     "refer to the PMM column in the table below."
 )
 
-# Shrunk further from (5, 4) to (2.5, 2) for an ultra-compact UI
-fig, ax = plt.subplots(figsize=(2.5, 2), dpi=120)
-gov_pm = pm2 if df['DC_2'].max() > df['DC_3'].max() else pm3
-gov_label = "Axis-2 (M2 governs)" if df['DC_2'].max() > df['DC_3'].max() else "Axis-3 (M3 governs)"
+# Use Streamlit columns to restrict the width to 50% of the screen
+chart_col, empty_col = st.columns([1, 1])
 
-# Sort curve for a clean plot
-gov_sorted = gov_pm.sort_values('Axial_kN').drop_duplicates()
-ax.plot(gov_sorted['Moment_kNm'], gov_sorted['Axial_kN'],
-        color='steelblue', linewidth=2, label=f'φPn-φMn ({gov_label})')
+with chart_col:
+    # Restore a healthy proportion so the text actually fits!
+    fig, ax = plt.subplots(figsize=(6, 4.5), dpi=100)
+    gov_pm = pm2 if df['DC_2'].max() > df['DC_3'].max() else pm3
+    gov_label = "Axis-2 (M2 governs)" if df['DC_2'].max() > df['DC_3'].max() else "Axis-3 (M3 governs)"
 
-ax.scatter(df['M2_Mag'], df['P_Demand_kN'],
-           c=df['DC_2'], cmap='RdYlGn_r', vmin=0, vmax=1.2,
-           s=60, marker='s', zorder=5, label='M2 demands (colour = DC_2)')
-ax.scatter(df['M3_Mag'], df['P_Demand_kN'],
-           c=df['DC_3'], cmap='RdYlGn_r', vmin=0, vmax=1.2,
-           s=60, marker='^', zorder=5, label='M3 demands (colour = DC_3)')
+    gov_sorted = gov_pm.sort_values('Axial_kN').drop_duplicates()
+    ax.plot(gov_sorted['Moment_kNm'], gov_sorted['Axial_kN'],
+            color='steelblue', linewidth=2, label=f'φPn-φMn ({gov_label})')
 
-ax.axhline(0, color='black', linewidth=0.8)
-ax.axvline(0, color='black', linewidth=0.8)
-ax.set_xlabel("φMn (kNm)")
-ax.set_ylabel("φPn (kN)")
-ax.set_title(f"Frame {frame_id}  —  {layout_text}")
-ax.grid(True, linestyle='--', alpha=0.5)
-ax.legend(fontsize=9)
-plt.colorbar(plt.cm.ScalarMappable(
-    cmap='RdYlGn_r',
-    norm=plt.Normalize(0, 1.2)), ax=ax, label='DC ratio')
-plt.tight_layout()
-# Ensures Streamlit respects our new ultra-small figsize
-st.pyplot(fig, use_container_width=False)
+    # Shrunk the scatter dots slightly
+    ax.scatter(df['M2_Mag'], df['P_Demand_kN'],
+               c=df['DC_2'], cmap='RdYlGn_r', vmin=0, vmax=1.2,
+               s=30, marker='s', zorder=5, label='M2 (colour=DC_2)')
+    ax.scatter(df['M3_Mag'], df['P_Demand_kN'],
+               c=df['DC_3'], cmap='RdYlGn_r', vmin=0, vmax=1.2,
+               s=30, marker='^', zorder=5, label='M3 (colour=DC_3)')
+
+    ax.axhline(0, color='black', linewidth=0.8)
+    ax.axvline(0, color='black', linewidth=0.8)
+    ax.set_xlabel("φMn (kNm)", fontsize=9)
+    ax.set_ylabel("φPn (kN)", fontsize=9)
+    ax.set_title(f"Frame {frame_id}  —  {layout_text}", fontsize=11)
+    ax.grid(True, linestyle='--', alpha=0.5)
+    
+    # Shrink the legend font
+    ax.legend(fontsize=8)
+    
+    # Shrink the colorbar fonts
+    cbar = plt.colorbar(plt.cm.ScalarMappable(
+        cmap='RdYlGn_r',
+        norm=plt.Normalize(0, 1.2)), ax=ax)
+    cbar.set_label('DC ratio', size=8)
+    cbar.ax.tick_params(labelsize=8)
+
+    plt.tight_layout()
+    # Let Streamlit naturally fit it into the 50% column
+    st.pyplot(fig, use_container_width=True)
 
 # -- Results table --
 st.subheader("Load-combination table")
