@@ -716,7 +716,7 @@ st.caption(
 )
 
 # Shrunk from (8, 6) to (5, 4) for a much cleaner UI footprint
-fig, ax = plt.subplots(figsize=(5, 4), dpi=120)
+fig, ax = plt.subplots(figsize=(4, 2), dpi=120)
 gov_pm = pm2 if df['DC_2'].max() > df['DC_3'].max() else pm3
 gov_label = "Axis-2 (M2 governs)" if df['DC_2'].max() > df['DC_3'].max() else "Axis-3 (M3 governs)"
 
