@@ -447,7 +447,9 @@ def create_pdf(frame_name: str, b: float, h: float, fc: float, fy: float,
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
         fig.savefig(tmp_img.name, format="png", bbox_inches="tight", dpi=200)
         img_path = tmp_img.name
-    pdf.image(img_path, x=10, w=W)
+        
+    # Shrink width to 120mm and center it (210mm total width - 120mm / 2 = 45mm x-margin)
+    pdf.image(img_path, x=45, w=120)
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
         pdf.output(tmp_pdf.name)
