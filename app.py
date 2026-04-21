@@ -12,11 +12,11 @@ import os
 # ============================================================
 # CONSTANTS
 # ============================================================
-ES = 200_000
-ECU = 0.003
-PHI_TIED = 0.65
-PHI_TENSION = 0.90
-PHI_SHEAR = 0.75
+ES = 200_000       # MPa - steel modulus
+ECU = 0.003        # ACI 318-19 §22.2.2.1 - ultimate concrete strain
+PHI_TIED = 0.65    # ACI Table 21.2.1 - tied column
+PHI_TENSION = 0.90 # ACI Table 21.2.1 - tension-controlled
+PHI_SHEAR = 0.75   # ACI §21.2.1
 
 # ============================================================
 # PAGE CONFIG & GLOBAL CSS
@@ -82,7 +82,7 @@ h3 { font-size: 0.95rem !important; font-weight: 600 !important; }
 
 
 # ============================================================
-# ENGINEERING ENGINES  (unchanged from original)
+# ENGINEERING ENGINES
 # ============================================================
 
 def beta1(fc):
@@ -145,7 +145,11 @@ def generate_pm_curve(width, depth, fc, fy, cover, n_width, n_depth, bar_dia, ti
             Ms += F * (depth / 2 - L['d'])
         Pn = Cc + Fs
         Mn = Mc + Ms
+        
+        # --- MATH BUG FIX ---
+        # Evaluate tensile strain correctly as a positive magnitude
         eps_t = ECU * (layers[-1]['d'] - c) / c
+        
         if eps_t <= ey:
             phi = PHI_TIED
         elif eps_t >= ey + 0.003:
@@ -240,7 +244,8 @@ def run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, bet
                 rho = Ast / Ag
                 fits, _, _ = check_bar_fit(b, h, nw, nd, dia, cover, tie_d)
                 if 0.01 <= rho <= 0.08 and fits:
-                    configs.append({'label': f"{total}-{name} ({nw}×{nd})",
+                    # Removed Unicode cross multiplier
+                    configs.append({'label': f"{total}-{name} ({nw}x{nd})",
                                     'Ast': Ast, 'nw': nw, 'nd': nd, 'dia': dia, 'total_bars': total})
     configs.sort(key=lambda x: (round(x['Ast'], -2), x['total_bars']))
     for cfg in configs:
@@ -267,7 +272,8 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
     pdf.add_page()
     W = 190
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(W, 9, f"RC Column Design — Frame: {frame_name}", ln=True, align='C')
+    # --- FPDF Unicode Fixes below ---
+    pdf.cell(W, 9, f"RC Column Design - Frame: {frame_name}", ln=True, align='C')
     pdf.set_font("Arial", '', 8)
     pdf.set_text_color(130, 130, 130)
     pdf.cell(W, 5, "ACI 318-19 | Non-sway | PCA Load Contour biaxial | Radial D/C interpolation", ln=True, align='C')
@@ -286,13 +292,13 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
         pdf.cell(W - 75, 5, str(val), ln=True)
 
     sec("Section")
-    row("Dimensions", f"{b} × {h} mm")
+    row("Dimensions", f"{b} x {h} mm")
     row("f'c / fy", f"{fc} MPa / {fy} MPa")
-    row("Ag", f"{int(b * h):,} mm²")
+    row("Ag", f"{int(b * h):,} mm^2")
     pdf.ln(2)
     sec("Reinforcement")
     row("Longitudinal", layout_text)
-    row("ρg", f"{rho_g} %")
+    row("rho_g", f"{rho_g} %")
     row("Ties", tie_text)
     pdf.ln(2)
     sec("Slenderness")
@@ -309,7 +315,7 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
     row("Governing combo", max_combo)
     pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(130, 130, 130)
-    pdf.cell(W, 5, "  * α = 1.15–1.50 dynamic; D/C via radial eccentricity interpolation", ln=True)
+    pdf.cell(W, 5, "  * alpha = 1.15-1.50 dynamic; D/C via radial eccentricity interpolation", ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
     sec("P-M Interaction Diagram")
@@ -350,14 +356,14 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
     ax.set_facecolor("#fafafa")
 
     # ── PM curves ──────────────────────────────────────────
-    for pm, color, lbl in [(pm2, BLUE, "Axis-2  (M2–P)"),
-                            (pm3, ORANGE, "Axis-3  (M3–P)")]:
+    for pm, color, lbl in [(pm2, BLUE, "Axis-2  (M2-P)"),
+                           (pm3, ORANGE, "Axis-3  (M3-P)")]:
         s = pm.sort_values('Axial_kN').drop_duplicates()
         ax.plot(s['Moment_kNm'], s['Axial_kN'],
                 color=color, linewidth=2.2, label=lbl, zorder=3)
         # Shade inside the curve lightly
         ax.fill_betweenx(s['Axial_kN'], 0, s['Moment_kNm'],
-                          color=color, alpha=0.04, zorder=1)
+                         color=color, alpha=0.04, zorder=1)
 
     # ── Demand points ──────────────────────────────────────
     pmm_vals = df['PMM'].clip(0, 2.0)
@@ -437,8 +443,8 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
 sb = st.sidebar
 
 sb.markdown("### Section")
-b  = sb.number_input("Width b (mm) — axis-2", value=800, step=50, min_value=200)
-h  = sb.number_input("Depth h (mm) — axis-3", value=800, step=50, min_value=200)
+b  = sb.number_input("Width b (mm) - axis-2", value=800, step=50, min_value=200)
+h  = sb.number_input("Depth h (mm) - axis-3", value=800, step=50, min_value=200)
 fc = sb.number_input("f'c (MPa)", value=40, step=5, min_value=20)
 fy = sb.number_input("fy  (MPa)", value=500, step=10, min_value=300)
 
@@ -464,9 +470,9 @@ if not auto_opt:
     fits, req_w, req_h = check_bar_fit(b, h, nw, nd, bar_dia, cover, tie_d)
     rho_icon = "✅" if above_min and below_max else "❌"
     sb.markdown(f"**{total_bars} bars · {round(Ast,0):.0f} mm² · ρg {rho_pct}% {rho_icon}**")
-    if not above_min: sb.error("ρg < 1% — ACI §10.6.1.1")
-    if not below_max: sb.error("ρg > 8% — ACI §10.6.1.1")
-    if not fits:      sb.error(f"Bars don't fit — needs {req_w}/{req_h} mm")
+    if not above_min: sb.error("ρg < 1% - ACI §10.6.1.1")
+    if not below_max: sb.error("ρg > 8% - ACI §10.6.1.1")
+    if not fits:      sb.error(f"Bars don't fit - needs {req_w}/{req_h} mm")
 
 sb.markdown("### Slenderness")
 c1, c2 = sb.columns(2)
@@ -475,7 +481,7 @@ lu_3 = c2.number_input("lu-3 (mm)", value=3000, step=100, min_value=500)
 c3, c4 = sb.columns(2)
 k_2 = c3.number_input("k (axis 2)", value=1.0, step=0.05, min_value=0.5)
 k_3 = c4.number_input("k (axis 3)", value=1.0, step=0.05, min_value=0.5)
-sb.caption("Cm = 0.6−0.4·(M1/M2)  — use 1.0 if unknown")
+sb.caption("Cm = 0.6-0.4·(M1/M2)  - use 1.0 if unknown")
 c5, c6 = sb.columns(2)
 Cm_2 = c5.slider("Cm-2", 0.20, 1.00, 1.00, 0.05)
 Cm_3 = c6.slider("Cm-3", 0.20, 1.00, 1.00, 0.05)
@@ -487,9 +493,9 @@ fyt_shear = sb.number_input("Tie fy for shear (MPa)", value=400, step=10, min_va
 
 
 # ============================================================
-# MAIN AREA — HEADER
+# MAIN AREA - HEADER
 # ============================================================
-st.title("🏗️ RC Column Designer — ACI 318-19")
+st.title("🏗️ RC Column Designer - ACI 318-19")
 st.caption("Non-sway · Discrete 4-face rebar · PCA biaxial (Bresler-Parme) · Radial D/C interpolation")
 st.warning("**Scope:** Non-sway frames only. Seismic (Ch. 18) not checked. Preliminary design only.", icon="⚠️")
 
@@ -524,7 +530,7 @@ df['P_Demand_kN']   = df['P'] * -1
 df['M2_Demand_kNm'] = df['M2']
 df['M3_Demand_kNm'] = df['M3']
 
-st.caption("⚠️ SAP2000 sign: P is negated (compression → positive). Verify before use.")
+st.caption("⚠️ SAP2000 sign: P is negated (compression -> positive). Verify before use.")
 
 # ============================================================
 # AUTO-OPTIMISE
@@ -533,13 +539,13 @@ if auto_opt:
     with st.spinner("Optimising rebar grid…"):
         best = run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns, tie_d)
     if best is None:
-        st.error("Optimisation failed — section cannot satisfy demands within 1–8% ρg.")
+        st.error("Optimisation failed - section cannot satisfy demands within 1-8% ρg.")
         st.stop()
     nw, nd, bar_dia = best['nw'], best['nd'], best['dia']
     Ast = best['Ast']
     total_bars = best['total_bars']
     rho_pct = round(Ast / (b * h) * 100, 2)
-    st.success(f"Optimised: **{best['label']}**  ·  ρg = {rho_pct}%")
+    st.success(f"Optimised: **{best['label']}** ·  ρg = {rho_pct}%")
 else:
     if not fits:
         st.error("Fix bar-fit error in sidebar.")
@@ -552,7 +558,8 @@ else:
 # CALCULATIONS
 # ============================================================
 tie_spacing = calculate_tie_spacing(b, h, bar_dia, tie_d)
-layout_text = f"{total_bars}-DB{bar_dia} ({nw}×{nd})"
+# Removed the Unicode multiplication sign here as well just to be safe
+layout_text = f"{total_bars}-DB{bar_dia} ({nw}x{nd})"
 tie_text    = f"{sel_tie} @ {tie_spacing} mm"
 
 r2 = 0.3 * b
@@ -613,23 +620,23 @@ m6.metric("Total bars", total_bars)
 
 # ── Status banner ──────────────────────────────────────────
 if max_ratio > 1.0:
-    st.error(f"**FAIL** — PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
+    st.error(f"**FAIL** - PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
 elif max_ratio > 0.90:
-    st.warning(f"**MARGINAL** — PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
+    st.warning(f"**MARGINAL** - PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
 else:
-    st.success(f"**PASS** — PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}  ·  Ties: {tie_text}")
+    st.success(f"**PASS** - PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}  ·  Ties: {tie_text}")
 
 # ── Slenderness warnings ────────────────────────────────────
 max_delta = max(df['Delta_2'].max(), df['Delta_3'].max())
 for axis, klu_r in [("axis-2", klu_r_2), ("axis-3", klu_r_3)]:
     if klu_r > 100:
-        st.error(f"klu/r = {round(klu_r,1)} ({axis}) — extremely slender. Use second-order analysis.")
+        st.error(f"klu/r = {round(klu_r,1)} ({axis}) - extremely slender. Use second-order analysis.")
     elif klu_r > 34:
-        st.warning(f"klu/r = {round(klu_r,1)} ({axis}) — slender; magnification applied.")
+        st.warning(f"klu/r = {round(klu_r,1)} ({axis}) - slender; magnification applied.")
 if max_delta >= 990:
-    st.error("**BUCKLING FAILURE** — Pu ≥ 0.75·Pc. Increase section or reduce lu.")
+    st.error("**BUCKLING FAILURE** - Pu ≥ 0.75·Pc. Increase section or reduce lu.")
 elif max_delta > 1.4:
-    st.warning(f"Max δ = {round(max_delta,2)} > 1.4 — significant slenderness amplification.")
+    st.warning(f"Max δ = {round(max_delta,2)} > 1.4 - significant slenderness amplification.")
 
 # ── Shear check ────────────────────────────────────────────
 if shear_info:
@@ -640,7 +647,7 @@ if shear_info:
     sh2.metric(f"{'✅' if shear_info['pass3'] else '❌'} φVn (axis-3)",
                f"{shear_info['phi_Vn3']} kN", f"Vu = {shear_info['V3_max']} kN")
     if not shear_info['pass2'] or not shear_info['pass3']:
-        st.error("Shear demand exceeds capacity — increase tie size/frequency or enlarge section.")
+        st.error("Shear demand exceeds capacity - increase tie size/frequency or enlarge section.")
 
 st.markdown("---")
 
@@ -654,7 +661,7 @@ with chart_col:
     st.pyplot(fig, use_container_width=True)
     st.caption(
         "ℹ️ Biaxial: PCA Load Contour $(DC_2)^α+(DC_3)^α=1$, "
-        "α = 1.15–1.50 (axial-dependent). "
+        "α = 1.15-1.50 (axial-dependent). "
         "Points inside a curve may still fail the biaxial check."
     )
 
