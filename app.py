@@ -331,7 +331,8 @@ def column_shear_capacity(b: float, d: float, fc: float,
 
 def run_optimizer(df: pd.DataFrame, b: float, h: float,
                   fc: float, fy: float, cover: float,
-                  lu: float, k: float, Cm: float, beta_dns: float,
+                  lu_2: float, lu_3: float, k_2: float, k_3: float,
+                  Cm_2: float, Cm_3: float, beta_dns: float,
                   tie_d: float) -> dict | None:
     Ag = b * h
     bars = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
@@ -363,8 +364,8 @@ def run_optimizer(df: pd.DataFrame, b: float, h: float,
         ok = True
         for _, row in df.iterrows():
             P = row['P_Demand_kN']
-            Mc2, _ = magnify_moment(P, row['M2_Demand_kNm'], h, b, fc, lu, k, Cm, beta_dns)
-            Mc3, _ = magnify_moment(P, row['M3_Demand_kNm'], b, h, fc, lu, k, Cm, beta_dns)
+            Mc2, _ = magnify_moment(P, row['M2_Demand_kNm'], h, b, fc, lu_2, k_2, Cm_2, beta_dns)
+            Mc3, _ = magnify_moment(P, row['M3_Demand_kNm'], b, h, fc, lu_3, k_3, Cm_3, beta_dns)
             dc2 = get_dc_ratio(pm2, P, Mc2)
             dc3 = get_dc_ratio(pm3, P, Mc3)
             alpha = dynamic_alpha(P, Po_kN)
@@ -394,7 +395,7 @@ def create_pdf(frame_name: str, b: float, h: float, fc: float, fy: float,
     pdf.cell(W, 10, f"RC Column Design Report — Frame: {frame_name}", ln=True, align='C')
     pdf.set_font("Arial", '', 9)
     pdf.set_text_color(120, 120, 120)
-    pdf.cell(W, 6, "ACI 318-19 | Non-sway frame | Biaxial: PCA Load Contour (Bresler-Parme, dynamic α)", ln=True, align='C')
+    pdf.cell(W, 6, "ACI 318-19 | Non-sway frame | Biaxial: PCA Load Contour (Bresler-Parme, dynamic alpha)", ln=True, align='C')
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
 
@@ -439,7 +440,7 @@ def create_pdf(frame_name: str, b: float, h: float, fc: float, fy: float,
     row("Governing combo", max_combo)
     pdf.set_font("Arial", 'I', 9)
     pdf.set_text_color(100, 100, 100)
-    pdf.cell(W, 5, "  * Biaxial check per PCA Load Contour Method, alpha = 1.15 – 1.50 (dynamic, axial-load dependent)", ln=True)
+    pdf.cell(W, 5, "  * Biaxial check per PCA Load Contour Method, alpha = 1.15 - 1.50 (dynamic, axial-load dependent)", ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
 
@@ -447,7 +448,7 @@ def create_pdf(frame_name: str, b: float, h: float, fc: float, fy: float,
     with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp_img:
         fig.savefig(tmp_img.name, format="png", bbox_inches="tight", dpi=200)
         img_path = tmp_img.name
-        
+    
     # Shrink width to 120mm and center it (210mm total width - 120mm / 2 = 45mm x-margin)
     pdf.image(img_path, x=45, w=120)
 
@@ -521,12 +522,25 @@ if not auto_opt:
     if not fits:
         sb.error(f"Bars don't fit! Needs {req_w} mm (width) / {req_h} mm (depth) clear — ACI §25.2.3")
 
+# --- UPDATED SLENDERNESS SECTION ---
 sb.header("4 · Slenderness / creep")
-lu = sb.number_input("Unsupported length lu (mm)", value=3_000, step=100, min_value=500)
-k  = sb.number_input("Effective length factor k", value=1.0, step=0.05, min_value=0.5)
+
+# Use side-by-side columns to keep the sidebar compact
+col_lu1, col_lu2 = sb.columns(2)
+lu_2 = col_lu1.number_input("lu (Axis 2) mm", value=3000, step=100, min_value=500)
+lu_3 = col_lu2.number_input("lu (Axis 3) mm", value=3000, step=100, min_value=500)
+
+col_k1, col_k2 = sb.columns(2)
+k_2 = col_k1.number_input("k (Axis 2)", value=1.0, step=0.05, min_value=0.5)
+k_3 = col_k2.number_input("k (Axis 3)", value=1.0, step=0.05, min_value=0.5)
+
 sb.caption("Cm — ACI §6.6.4.5.3a: Cm = 0.6 − 0.4·(M1/M2). Use 1.0 for transverse loads or if M1/M2 unknown.")
-Cm = sb.slider("Cm factor", 0.20, 1.00, 1.00, 0.05)
+col_cm1, col_cm2 = sb.columns(2)
+Cm_2 = col_cm1.slider("Cm (Axis 2)", 0.20, 1.00, 1.00, 0.05)
+Cm_3 = col_cm2.slider("Cm (Axis 3)", 0.20, 1.00, 1.00, 0.05)
+
 beta_dns = sb.slider("βdns (sustained-load ratio)", 0.0, 1.0, 0.0, 0.05)
+# ------------------------------------
 
 sb.header("5 · Shear check (optional)")
 check_shear = sb.checkbox("Check column shear capacity")
@@ -574,7 +588,7 @@ st.caption(
 # ---- Auto-optimizer ----
 if auto_opt:
     with st.spinner("Optimising constructable rebar grid…"):
-        best = run_optimizer(df, b, h, fc, fy, cover, lu, k, Cm, beta_dns, tie_d)
+        best = run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns, tie_d)
     if best is None:
         st.error("Optimisation failed — section cannot satisfy demands within 1–8 % ρg. Increase section size.")
         st.stop()
@@ -583,7 +597,7 @@ if auto_opt:
     total_bars = best['total_bars']
     rho_pct = round(Ast / (b * h) * 100, 2)
     fits = True
-    st.success(f"Optimised layout: **{best['label']}**  |  ρg = {rho_pct} %")
+    st.success(f"Optimised layout: **{best['label']}** |  ρg = {rho_pct} %")
 else:
     # Manual mode — halt if geometry is invalid
     if not fits:
@@ -601,16 +615,16 @@ tie_text    = f"{sel_tie} @ {tie_spacing} mm (ACI §25.7.2)"
 # ---- Slenderness parameters ----
 r2 = 0.3 * b   # radius of gyration about axis 2 (bending in plane of h)
 r3 = 0.3 * h   # radius of gyration about axis 3
-klu_r_2 = (k * lu) / r2
-klu_r_3 = (k * lu) / r3
+klu_r_2 = (k_2 * lu_2) / r2
+klu_r_3 = (k_3 * lu_3) / r3
 
 # ---- Moment magnification ----
 df[['M2_Mag', 'Delta_2']] = df.apply(
     lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M2_Demand_kNm'],
-                                        h, b, fc, lu, k, Cm, beta_dns)), axis=1)
+                                        h, b, fc, lu_2, k_2, Cm_2, beta_dns)), axis=1)
 df[['M3_Mag', 'Delta_3']] = df.apply(
     lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M3_Demand_kNm'],
-                                        b, h, fc, lu, k, Cm, beta_dns)), axis=1)
+                                        b, h, fc, lu_3, k_3, Cm_3, beta_dns)), axis=1)
 
 # ---- PM curves ----
 # Axis-2 bending: neutral axis || axis 2 → use (width=h, depth=b) with nd, nw bars
@@ -715,11 +729,9 @@ st.caption(
     "refer to the PMM column in the table below."
 )
 
-# Use Streamlit columns to restrict the width to 50% of the screen
 chart_col, empty_col = st.columns([1, 1])
 
 with chart_col:
-    # Restore a healthy proportion so the text actually fits!
     fig, ax = plt.subplots(figsize=(6, 4.5), dpi=100)
     gov_pm = pm2 if df['DC_2'].max() > df['DC_3'].max() else pm3
     gov_label = "Axis-2 (M2 governs)" if df['DC_2'].max() > df['DC_3'].max() else "Axis-3 (M3 governs)"
@@ -728,7 +740,6 @@ with chart_col:
     ax.plot(gov_sorted['Moment_kNm'], gov_sorted['Axial_kN'],
             color='steelblue', linewidth=2, label=f'φPn-φMn ({gov_label})')
 
-    # Shrunk the scatter dots slightly
     ax.scatter(df['M2_Mag'], df['P_Demand_kN'],
                c=df['DC_2'], cmap='RdYlGn_r', vmin=0, vmax=1.2,
                s=30, marker='s', zorder=5, label='M2 (colour=DC_2)')
@@ -743,10 +754,8 @@ with chart_col:
     ax.set_title(f"Frame {frame_id}  —  {layout_text}", fontsize=11)
     ax.grid(True, linestyle='--', alpha=0.5)
     
-    # Shrink the legend font
     ax.legend(fontsize=8)
     
-    # Shrink the colorbar fonts
     cbar = plt.colorbar(plt.cm.ScalarMappable(
         cmap='RdYlGn_r',
         norm=plt.Normalize(0, 1.2)), ax=ax)
@@ -754,7 +763,6 @@ with chart_col:
     cbar.ax.tick_params(labelsize=8)
 
     plt.tight_layout()
-    # Let Streamlit naturally fit it into the 50% column
     st.pyplot(fig, use_container_width=True)
 
 # -- Results table --
