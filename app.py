@@ -41,23 +41,23 @@ h3 { font-size: 0.95rem !important; font-weight: 600 !important; }
 /* ── Sidebar tightening ── */
 [data-testid="stSidebar"] { min-width: 260px !important; max-width: 280px !important; }
 [data-testid="stSidebar"] .block-container { padding: 0.75rem 0.75rem 1rem !important; }
-[data-testid="stSidebar"] label { font-size: 11px !important; color: #555 !important; font-weight: 500; }
+[data-testid="stSidebar"] label { font-size: 11px !important; opacity: 0.8 !important; font-weight: 500; }
 [data-testid="stSidebar"] .stNumberInput input,
 [data-testid="stSidebar"] .stSelectbox select { font-size: 12px !important; padding: 2px 6px !important; }
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
 [data-testid="stSidebar"] h3 { font-size: 0.78rem !important; text-transform: uppercase;
-    letter-spacing: 0.08em; color: #888; margin: 0.8rem 0 0.25rem; font-weight: 600 !important; }
+    letter-spacing: 0.08em; opacity: 0.6; margin: 0.8rem 0 0.25rem; font-weight: 600 !important; }
 
-/* ── Metric cards ── */
-[data-testid="stMetric"] { background: #f7f8fa; border: 1px solid #e5e7eb;
+/* ── Metric cards (Fixed for Light/Dark Mode) ── */
+[data-testid="stMetric"] { background: rgba(130, 130, 130, 0.1); border: 1px solid rgba(130, 130, 130, 0.2);
     border-radius: 8px; padding: 10px 14px !important; }
-[data-testid="stMetricLabel"] { font-size: 10px !important; color: #777 !important;
+[data-testid="stMetricLabel"] { font-size: 10px !important; opacity: 0.7 !important;
     text-transform: uppercase; letter-spacing: 0.06em; }
 [data-testid="stMetricValue"] { font-size: 1.4rem !important; font-weight: 700 !important; }
 
 /* ── Caption & info ── */
-.stCaption { font-size: 11px !important; color: #888; }
+.stCaption { font-size: 11px !important; opacity: 0.7; }
 .stAlert p { font-size: 12px !important; }
 
 /* ── Dataframe ── */
@@ -75,7 +75,7 @@ h3 { font-size: 0.95rem !important; font-weight: 600 !important; }
 /* ── Section divider helper ── */
 .section-label {
     font-size: 10px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.1em; color: #aaa; margin: 0 0 4px;
+    letter-spacing: 0.1em; opacity: 0.6; margin: 0 0 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -146,7 +146,6 @@ def generate_pm_curve(width, depth, fc, fy, cover, n_width, n_depth, bar_dia, ti
         Pn = Cc + Fs
         Mn = Mc + Ms
         
-        # --- MATH BUG FIX ---
         # Evaluate tensile strain correctly as a positive magnitude
         eps_t = ECU * (layers[-1]['d'] - c) / c
         
@@ -244,7 +243,6 @@ def run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, bet
                 rho = Ast / Ag
                 fits, _, _ = check_bar_fit(b, h, nw, nd, dia, cover, tie_d)
                 if 0.01 <= rho <= 0.08 and fits:
-                    # Removed Unicode cross multiplier
                     configs.append({'label': f"{total}-{name} ({nw}x{nd})",
                                     'Ast': Ast, 'nw': nw, 'nd': nd, 'dia': dia, 'total_bars': total})
     configs.sort(key=lambda x: (round(x['Ast'], -2), x['total_bars']))
@@ -272,7 +270,6 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
     pdf.add_page()
     W = 190
     pdf.set_font("Arial", 'B', 14)
-    # --- FPDF Unicode Fixes below ---
     pdf.cell(W, 9, f"RC Column Design - Frame: {frame_name}", ln=True, align='C')
     pdf.set_font("Arial", '', 8)
     pdf.set_text_color(130, 130, 130)
@@ -339,14 +336,6 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
 # ============================================================
 
 def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
-    """
-    Clean, professional PMM interaction diagram:
-    - Both axes plotted on the same chart with distinct colours
-    - Demand points sized and coloured by PMM ratio (red = failing)
-    - Balance point annotated
-    - Tight axis limits with 5% padding
-    - Gridlines subdued; axes through origin prominent
-    """
     BLUE   = "#1a6fad"
     ORANGE = "#e07b00"
     GRAY   = "#c0c4cc"
@@ -355,36 +344,29 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
     fig.patch.set_facecolor("white")
     ax.set_facecolor("#fafafa")
 
-    # ── PM curves ──────────────────────────────────────────
     for pm, color, lbl in [(pm2, BLUE, "Axis-2  (M2-P)"),
                            (pm3, ORANGE, "Axis-3  (M3-P)")]:
         s = pm.sort_values('Axial_kN').drop_duplicates()
         ax.plot(s['Moment_kNm'], s['Axial_kN'],
                 color=color, linewidth=2.2, label=lbl, zorder=3)
-        # Shade inside the curve lightly
         ax.fill_betweenx(s['Axial_kN'], 0, s['Moment_kNm'],
                          color=color, alpha=0.04, zorder=1)
 
-    # ── Demand points ──────────────────────────────────────
     pmm_vals = df['PMM'].clip(0, 2.0)
-    # Colourmap: green (< 0.7) → yellow → red (> 1.0)
     cmap = plt.cm.RdYlGn_r
     norm = plt.Normalize(0.5, 1.2)
 
-    # M2 demands (squares)
     sc2 = ax.scatter(df['M2_Mag'], df['P_Demand_kN'],
                      c=pmm_vals, cmap=cmap, norm=norm,
                      s=55, marker='s', zorder=5,
                      edgecolors='white', linewidths=0.6,
                      label='M2 demands')
-    # M3 demands (triangles)
     sc3 = ax.scatter(df['M3_Mag'], df['P_Demand_kN'],
                      c=pmm_vals, cmap=cmap, norm=norm,
                      s=55, marker='^', zorder=5,
                      edgecolors='white', linewidths=0.6,
                      label='M3 demands')
 
-    # Highlight governing (max PMM) point
     gov_idx = df['PMM'].idxmax()
     gov_M2  = df.loc[gov_idx, 'M2_Mag']
     gov_M3  = df.loc[gov_idx, 'M3_Mag']
@@ -394,11 +376,9 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
                s=130, marker='*', color='#d00000', zorder=7,
                label=f'Governing  PMM={gov_pmm:.3f}', edgecolors='white', linewidths=0.5)
 
-    # ── Reference lines ────────────────────────────────────
     ax.axhline(0, color='#333', linewidth=0.9, zorder=2)
     ax.axvline(0, color='#333', linewidth=0.9, zorder=2)
 
-    # ── Colourbar ──────────────────────────────────────────
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
     cbar = fig.colorbar(sm, ax=ax, fraction=0.03, pad=0.02, aspect=22)
@@ -406,14 +386,12 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
     cbar.ax.tick_params(labelsize=7)
     cbar.ax.axhline(y=1.0, color='#d00000', linewidth=1.2, linestyle='--')
 
-    # ── Axes labels & ticks ────────────────────────────────
     ax.set_xlabel("φMn  (kNm)", fontsize=9, labelpad=4)
     ax.set_ylabel("φPn  (kN)",  fontsize=9, labelpad=4)
     ax.tick_params(axis='both', labelsize=8, length=3)
     ax.xaxis.set_major_locator(mticker.MaxNLocator(6, integer=True))
     ax.yaxis.set_major_locator(mticker.MaxNLocator(7, integer=True))
 
-    # Tight limits with padding
     all_M = pd.concat([pm2['Moment_kNm'], pm3['Moment_kNm'], df['M2_Mag'], df['M3_Mag']])
     all_P = pd.concat([pm2['Axial_kN'],   pm3['Axial_kN'],   df['P_Demand_kN']])
     m_pad = (all_M.max() - all_M.min()) * 0.07
@@ -421,10 +399,8 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
     ax.set_xlim(-m_pad, all_M.max() + m_pad)
     ax.set_ylim(all_P.min() - p_pad, all_P.max() + p_pad)
 
-    # ── Grid ───────────────────────────────────────────────
     ax.grid(True, linestyle=':', linewidth=0.5, color='#ccc', zorder=0)
 
-    # ── Legend ─────────────────────────────────────────────
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(handles, labels, fontsize=7.5, framealpha=0.9,
               loc='lower right', handlelength=1.8,
@@ -558,7 +534,6 @@ else:
 # CALCULATIONS
 # ============================================================
 tie_spacing = calculate_tie_spacing(b, h, bar_dia, tie_d)
-# Removed the Unicode multiplication sign here as well just to be safe
 layout_text = f"{total_bars}-DB{bar_dia} ({nw}x{nd})"
 tie_text    = f"{sel_tie} @ {tie_spacing} mm"
 
