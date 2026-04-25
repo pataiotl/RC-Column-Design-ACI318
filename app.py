@@ -326,8 +326,10 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
     with open(pdf_path, "rb") as f:
         data = f.read()
     for p in (img_path, pdf_path):
-        try: os.remove(p)
-        except: pass
+        try:
+            os.remove(p)
+        except OSError:
+            pass
     return data
 
 
