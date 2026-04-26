@@ -499,16 +499,37 @@ if 'Frame' not in df_raw.columns:
     st.error("CSV must contain a 'Frame' column.")
     st.stop()
 
-sb.markdown("### Select column")
-frame_id = sb.selectbox("Frame", df_raw['Frame'].unique())
+sb.markdown("### Select column(s)")
+unique_frames = sorted(df_raw['Frame'].dropna().unique().tolist())
+design_mode = sb.radio("Design mode", ["Single frame", "Grouping"], horizontal=False)
 
-df = df_raw[df_raw['Frame'] == frame_id].copy()
+if design_mode == "Single frame":
+    frame_id = sb.selectbox("Frame", unique_frames)
+    selected_frames = [frame_id]
+    selection_label = f"Frame {frame_id}"
+else:
+    default_group = unique_frames[:2] if len(unique_frames) >= 2 else unique_frames
+    selected_frames = sb.multiselect(
+        "Frames in group",
+        unique_frames,
+        default=default_group,
+        help="All selected frames are checked together using one reinforcement layout."
+    )
+    if not selected_frames:
+        st.error("Select at least one frame for grouping mode.")
+        st.stop()
+    frame_id = "GROUP"
+    selection_label = f"Group ({len(selected_frames)} frames)"
+
+df = df_raw[df_raw['Frame'].isin(selected_frames)].copy()
 df['Load_Combo']     = df['OutputCase']
 df['P_Demand_kN']   = df['P'] * -1
 df['M2_Demand_kNm'] = df['M2']
 df['M3_Demand_kNm'] = df['M3']
 
 st.caption("⚠️ SAP2000 sign: P is negated (compression -> positive). Verify before use.")
+if len(selected_frames) > 1:
+    st.caption(f"📦 Grouping active: {', '.join(map(str, selected_frames))}")
 
 # ============================================================
 # AUTO-OPTIMISE
@@ -560,7 +581,7 @@ df['PMM']   = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), 
 
 max_idx   = df['PMM'].idxmax()
 max_ratio = df.loc[max_idx, 'PMM']
-max_combo = df.loc[max_idx, 'Load_Combo']
+max_combo = f"{df.loc[max_idx, 'Frame']} · {df.loc[max_idx, 'Load_Combo']}"
 
 # Shear
 shear_info = {}
@@ -597,11 +618,11 @@ m6.metric("Total bars", total_bars)
 
 # ── Status banner ──────────────────────────────────────────
 if max_ratio > 1.0:
-    st.error(f"**FAIL** - PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
+    st.error(f"**FAIL** - {selection_label} · PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
 elif max_ratio > 0.90:
-    st.warning(f"**MARGINAL** - PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
+    st.warning(f"**MARGINAL** - {selection_label} · PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
 else:
-    st.success(f"**PASS** - PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}  ·  Ties: {tie_text}")
+    st.success(f"**PASS** - {selection_label} · PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}  ·  Ties: {tie_text}")
 
 # ── Slenderness warnings ────────────────────────────────────
 max_delta = max(df['Delta_2'].max(), df['Delta_3'].max())
@@ -634,7 +655,7 @@ chart_col, table_col = st.columns([5, 7])
 with chart_col:
     st.markdown("**P-M Interaction Diagram**")
     st.caption("Both axes plotted · demand colour = PMM ratio · ★ = governing combo")
-    fig = make_pmm_chart(pm2, pm3, df, frame_id, layout_text)
+    fig = make_pmm_chart(pm2, pm3, df, selection_label, layout_text)
     st.pyplot(fig, use_container_width=True)
     st.caption(
         "ℹ️ Biaxial: PCA Load Contour $(DC_2)^α+(DC_3)^α=1$, "
@@ -644,7 +665,7 @@ with chart_col:
 
 with table_col:
     st.markdown("**Load-combination results**")
-    disp = ['Load_Combo','P_Demand_kN','M2_Mag','Delta_2','DC_2','M3_Mag','Delta_3','DC_3','Alpha','PMM']
+    disp = ['Frame','Load_Combo','P_Demand_kN','M2_Mag','Delta_2','DC_2','M3_Mag','Delta_3','DC_3','Alpha','PMM']
 
     def _hl_d(v):
         if isinstance(v, (int,float)):
@@ -671,7 +692,7 @@ with table_col:
 st.markdown("---")
 pdf_col, _ = st.columns([2, 5])
 with pdf_col:
-    pdf_bytes = create_pdf(frame_id, b, h, fc, fy, layout_text, tie_text,
+    pdf_bytes = create_pdf(selection_label, b, h, fc, fy, layout_text, tie_text,
                            rho_pct, max_ratio, max_combo, klu_r_2, klu_r_3, fig)
     st.download_button("📥 Download PDF report", data=pdf_bytes,
                        file_name=f"Column_{frame_id}.pdf", mime="application/pdf")
