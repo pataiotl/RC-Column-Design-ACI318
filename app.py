@@ -8,6 +8,8 @@ import numpy as np
 from fpdf import FPDF
 import tempfile
 import os
+import json
+from datetime import datetime
 
 # ============================================================
 # CONSTANTS
@@ -17,6 +19,9 @@ ECU = 0.003        # ACI 318-19 §22.2.2.1 - ultimate concrete strain
 PHI_TIED = 0.65    # ACI Table 21.2.1 - tied column
 PHI_TENSION = 0.90 # ACI Table 21.2.1 - tension-controlled
 PHI_SHEAR = 0.75   # ACI §21.2.1
+
+# Save/Load directory
+SAVE_DIR = os.path.join(os.path.dirname(__file__), "saved_states")
 
 # ============================================================
 # PAGE CONFIG & GLOBAL CSS
@@ -416,31 +421,162 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
 
 
 # ============================================================
+# SAVE/LOAD STATE FUNCTIONS
+# ============================================================
+def save_state(state_data):
+    """Save current state to JSON file."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"rc_column_state_{timestamp}.json"
+    filepath = os.path.join(SAVE_DIR, filename)
+    with open(filepath, "w", encoding="utf-8") as f:
+        json.dump(state_data, f, indent=2)
+    return filepath
+
+
+def load_state(filepath):
+    """Load state from JSON file."""
+    with open(filepath, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def get_saved_files():
+    """Get list of saved state files."""
+    if not os.path.exists(SAVE_DIR):
+        return []
+    files = [
+        f for f in os.listdir(SAVE_DIR)
+        if f.startswith("rc_column_state_") and f.endswith(".json")
+    ]
+    files.sort(reverse=True)
+    return files
+
+
+# ============================================================
 # SIDEBAR
 # ============================================================
 sb = st.sidebar
 
+# --- Save/Load State Section ---
+sb.markdown("### 💾 Save/Load State")
+
+if "saved_files" not in st.session_state:
+    st.session_state.saved_files = get_saved_files()
+
+if sb.button("💾 Save Current State", key="save_state_btn"):
+    state_to_save = {
+        "section": {
+            "b": st.session_state.get("b", 800),
+            "h": st.session_state.get("h", 800),
+            "fc": st.session_state.get("fc", 40),
+            "fy": st.session_state.get("fy", 500),
+        },
+        "ties": {
+            "tie_size": st.session_state.get("sel_tie", "DB10"),
+            "cover": st.session_state.get("cover", 40),
+        },
+        "longitudinal": {
+            "auto_opt": st.session_state.get("auto_opt", False),
+            "nw": st.session_state.get("nw", 4),
+            "nd": st.session_state.get("nd", 4),
+            "bar_size": st.session_state.get("sel_bar", "DB25"),
+        },
+        "slenderness": {
+            "lu_2": st.session_state.get("lu_2", 3000),
+            "lu_3": st.session_state.get("lu_3", 3000),
+            "k_2": st.session_state.get("k_2", 1.0),
+            "k_3": st.session_state.get("k_3", 1.0),
+            "Cm_2": st.session_state.get("Cm_2", 1.0),
+            "Cm_3": st.session_state.get("Cm_3", 1.0),
+            "beta_dns": st.session_state.get("beta_dns", 0.0),
+        },
+        "shear": {
+            "check_shear": st.session_state.get("check_shear", False),
+            "fyt_shear": st.session_state.get("fyt_shear", 400),
+        },
+        "design_mode": st.session_state.get("design_mode", "Single frame"),
+        "selected_frame": st.session_state.get("frame_id"),
+        "selected_frames": st.session_state.get("selected_frames", []),
+        "csv_path": st.session_state.get("csv_path"),
+        "timestamp": datetime.now().isoformat(),
+    }
+    filepath = save_state(state_to_save)
+    st.session_state.saved_files = get_saved_files()
+    sb.success(f"Saved to: {os.path.basename(filepath)}")
+
+saved_files = get_saved_files()
+if saved_files:
+    file_options = {f: f.replace("rc_column_state_", "").replace(".json", "") for f in saved_files}
+    selected_file = sb.selectbox("Load saved state", list(file_options.keys()), format_func=lambda x: file_options[x], key="saved_state_file")
+    if sb.button("📂 Load Selected State", key="load_state_btn"):
+        filepath = os.path.join(SAVE_DIR, selected_file)
+        try:
+            loaded_data = load_state(filepath)
+
+            if "section" in loaded_data:
+                st.session_state.b = loaded_data["section"].get("b", 800)
+                st.session_state.h = loaded_data["section"].get("h", 800)
+                st.session_state.fc = loaded_data["section"].get("fc", 40)
+                st.session_state.fy = loaded_data["section"].get("fy", 500)
+            if "ties" in loaded_data:
+                st.session_state.sel_tie = loaded_data["ties"].get("tie_size", "DB10")
+                st.session_state.cover = loaded_data["ties"].get("cover", 40)
+            if "longitudinal" in loaded_data:
+                st.session_state.auto_opt = loaded_data["longitudinal"].get("auto_opt", False)
+                st.session_state.nw = loaded_data["longitudinal"].get("nw", 4)
+                st.session_state.nd = loaded_data["longitudinal"].get("nd", 4)
+                st.session_state.sel_bar = loaded_data["longitudinal"].get("bar_size", "DB25")
+            if "slenderness" in loaded_data:
+                st.session_state.lu_2 = loaded_data["slenderness"].get("lu_2", 3000)
+                st.session_state.lu_3 = loaded_data["slenderness"].get("lu_3", 3000)
+                st.session_state.k_2 = loaded_data["slenderness"].get("k_2", 1.0)
+                st.session_state.k_3 = loaded_data["slenderness"].get("k_3", 1.0)
+                st.session_state.Cm_2 = loaded_data["slenderness"].get("Cm_2", 1.0)
+                st.session_state.Cm_3 = loaded_data["slenderness"].get("Cm_3", 1.0)
+                st.session_state.beta_dns = loaded_data["slenderness"].get("beta_dns", 0.0)
+            if "shear" in loaded_data:
+                st.session_state.check_shear = loaded_data["shear"].get("check_shear", False)
+                st.session_state.fyt_shear = loaded_data["shear"].get("fyt_shear", 400)
+
+            st.session_state.design_mode = loaded_data.get("design_mode", "Single frame")
+            if loaded_data.get("selected_frame") is not None:
+                st.session_state.frame_id = loaded_data.get("selected_frame")
+            st.session_state.selected_frames = loaded_data.get("selected_frames", [])
+
+            csv_path = loaded_data.get("csv_path")
+            if csv_path:
+                st.session_state.csv_path = csv_path
+
+            sb.success(f"Loaded: {selected_file}")
+            st.rerun()
+        except Exception as e:
+            sb.error(f"Error loading state: {e}")
+else:
+    sb.info("No saved states found")
+
+sb.markdown("---")
+
 sb.markdown("### Section")
-b  = sb.number_input("Width b (mm) - axis-2", value=800, step=50, min_value=200)
-h  = sb.number_input("Depth h (mm) - axis-3", value=800, step=50, min_value=200)
-fc = sb.number_input("f'c (MPa)", value=40, step=5, min_value=20)
-fy = sb.number_input("fy  (MPa)", value=500, step=10, min_value=300)
+b  = sb.number_input("Width b (mm) - axis-2", value=st.session_state.get("b", 800), step=50, min_value=200, key="b")
+h  = sb.number_input("Depth h (mm) - axis-3", value=st.session_state.get("h", 800), step=50, min_value=200, key="h")
+fc = sb.number_input("f'c (MPa)", value=st.session_state.get("fc", 40), step=5, min_value=20, key="fc")
+fy = sb.number_input("fy  (MPa)", value=st.session_state.get("fy", 500), step=10, min_value=300, key="fy")
 
 sb.markdown("### Ties")
 tie_map  = {'RB9': 9, 'DB10': 10, 'DB12': 12}
-sel_tie  = sb.selectbox("Tie size", list(tie_map.keys()), index=1)
+sel_tie  = sb.selectbox("Tie size", list(tie_map.keys()), index=1, key="sel_tie")
 tie_d    = tie_map[sel_tie]
-cover    = sb.number_input("Clear cover (mm)", value=40, step=5, min_value=20)
+cover    = sb.number_input("Clear cover (mm)", value=st.session_state.get("cover", 40), step=5, min_value=20, key="cover")
 
 sb.markdown("### Longitudinal")
-auto_opt = sb.checkbox("🚀 Auto-optimise", value=False)
+auto_opt = sb.checkbox("🚀 Auto-optimise", value=st.session_state.get("auto_opt", False), key="auto_opt")
 bar_map  = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
 
 if not auto_opt:
     col_a, col_b = sb.columns(2)
-    nw      = col_a.number_input("Bars (width)", value=4, step=1, min_value=2)
-    nd      = col_b.number_input("Bars (depth)", value=4, step=1, min_value=2)
-    sel_bar = sb.selectbox("Bar size", list(bar_map.keys()), index=2)
+    nw      = col_a.number_input("Bars (width)", value=st.session_state.get("nw", 4), step=1, min_value=2, key="nw")
+    nd      = col_b.number_input("Bars (depth)", value=st.session_state.get("nd", 4), step=1, min_value=2, key="nd")
+    sel_bar = sb.selectbox("Bar size", list(bar_map.keys()), index=2, key="sel_bar")
     bar_dia = bar_map[sel_bar]
     total_bars = 2 * nw + 2 * (nd - 2)
     Ast = total_bars * math.pi * bar_dia ** 2 / 4
@@ -454,20 +590,20 @@ if not auto_opt:
 
 sb.markdown("### Slenderness")
 c1, c2 = sb.columns(2)
-lu_2 = c1.number_input("lu-2 (mm)", value=3000, step=100, min_value=500)
-lu_3 = c2.number_input("lu-3 (mm)", value=3000, step=100, min_value=500)
+lu_2 = c1.number_input("lu-2 (mm)", value=st.session_state.get("lu_2", 3000), step=100, min_value=500, key="lu_2")
+lu_3 = c2.number_input("lu-3 (mm)", value=st.session_state.get("lu_3", 3000), step=100, min_value=500, key="lu_3")
 c3, c4 = sb.columns(2)
-k_2 = c3.number_input("k (axis 2)", value=1.0, step=0.05, min_value=0.5)
-k_3 = c4.number_input("k (axis 3)", value=1.0, step=0.05, min_value=0.5)
+k_2 = c3.number_input("k (axis 2)", value=st.session_state.get("k_2", 1.0), step=0.05, min_value=0.5, key="k_2")
+k_3 = c4.number_input("k (axis 3)", value=st.session_state.get("k_3", 1.0), step=0.05, min_value=0.5, key="k_3")
 sb.caption("Cm = 0.6-0.4·(M1/M2)  - use 1.0 if unknown")
 c5, c6 = sb.columns(2)
-Cm_2 = c5.slider("Cm-2", 0.20, 1.00, 1.00, 0.05)
-Cm_3 = c6.slider("Cm-3", 0.20, 1.00, 1.00, 0.05)
-beta_dns = sb.slider("βdns", 0.0, 1.0, 0.0, 0.05)
+Cm_2 = c5.slider("Cm-2", 0.20, 1.00, st.session_state.get("Cm_2", 1.00), 0.05, key="Cm_2")
+Cm_3 = c6.slider("Cm-3", 0.20, 1.00, st.session_state.get("Cm_3", 1.00), 0.05, key="Cm_3")
+beta_dns = sb.slider("βdns", 0.0, 1.0, st.session_state.get("beta_dns", 0.0), 0.05, key="beta_dns")
 
 sb.markdown("### Shear (optional)")
-check_shear = sb.checkbox("Check shear capacity")
-fyt_shear = sb.number_input("Tie fy for shear (MPa)", value=400, step=10, min_value=250) if check_shear else 400
+check_shear = sb.checkbox("Check shear capacity", value=st.session_state.get("check_shear", False), key="check_shear")
+fyt_shear = sb.number_input("Tie fy for shear (MPa)", value=st.session_state.get("fyt_shear", 400), step=10, min_value=250, key="fyt_shear") if check_shear else 400
 
 
 # ============================================================
@@ -483,9 +619,25 @@ st.warning("**Scope:** Non-sway frames only. Seismic (Ch. 18) not checked. Preli
 uploaded = st.file_uploader("Upload SAP2000 frame-forces CSV", type=["csv"],
                              label_visibility="collapsed",
                              help="Expected columns: Frame, OutputCase, P, M2, M3")
+
+loaded_from_state = False
+if uploaded is None and st.session_state.get("csv_path") and os.path.exists(st.session_state.csv_path):
+    try:
+        uploaded = open(st.session_state.csv_path, "rb")
+        loaded_from_state = True
+    except OSError:
+        loaded_from_state = False
+
 if uploaded is None:
     st.info("Upload a SAP2000 frame-forces CSV to begin.  Required columns: Frame, OutputCase, P, M2, M3.")
     st.stop()
+
+if not loaded_from_state and hasattr(uploaded, "name") and hasattr(uploaded, "getvalue"):
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    safe_name = os.path.basename(uploaded.name)
+    st.session_state.csv_path = os.path.join(SAVE_DIR, safe_name)
+    with open(st.session_state.csv_path, "wb") as f:
+        f.write(uploaded.getvalue())
 
 df_raw = pd.read_csv(uploaded)
 if 'Frame' in df_raw.columns:
@@ -501,18 +653,20 @@ if 'Frame' not in df_raw.columns:
 
 sb.markdown("### Select column(s)")
 unique_frames = sorted(df_raw['Frame'].dropna().unique().tolist())
-design_mode = sb.radio("Design mode", ["Single frame", "Grouping"], horizontal=False)
+design_mode = sb.radio("Design mode", ["Single frame", "Grouping"], index=0 if st.session_state.get("design_mode", "Single frame") == "Single frame" else 1, horizontal=False, key="design_mode")
 
 if design_mode == "Single frame":
-    frame_id = sb.selectbox("Frame", unique_frames)
+    frame_id = sb.selectbox("Frame", unique_frames, key="frame_id")
     selected_frames = [frame_id]
+    st.session_state.selected_frames = selected_frames
     selection_label = f"Frame {frame_id}"
 else:
     default_group = unique_frames[:2] if len(unique_frames) >= 2 else unique_frames
     selected_frames = sb.multiselect(
         "Frames in group",
         unique_frames,
-        default=default_group,
+        default=st.session_state.get("selected_frames", default_group),
+        key="selected_frames",
         help="All selected frames are checked together using one reinforcement layout."
     )
     if not selected_frames:
