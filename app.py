@@ -10,18 +10,19 @@ import tempfile
 import os
 import json
 from datetime import datetime
+from io import BytesIO
 
 # ============================================================
 # CONSTANTS
 # ============================================================
-ES = 200_000       # MPa - steel modulus
-ECU = 0.003        # ACI 318-19 §22.2.2.1 - ultimate concrete strain
-PHI_TIED = 0.65    # ACI Table 21.2.1 - tied column
-PHI_TENSION = 0.90 # ACI Table 21.2.1 - tension-controlled
-PHI_SHEAR = 0.75   # ACI §21.2.1
+ES = 200_000  # MPa - steel modulus
+ECU = 0.003  # ACI 318-19 §22.2.2.1 - ultimate concrete strain
+PHI_TIED = 0.65  # ACI Table 21.2.1 - tied column
+PHI_TENSION = 0.90  # ACI Table 21.2.1 - tension-controlled
+PHI_SHEAR = 0.75  # ACI §21.2.1
 
 # Save/Load directory
-SAVE_DIR = os.path.join(os.path.dirname(__file__), "saved_states")
+SAVE_DIR = r"C:\Users\Patai\Desktop\New folder"
 
 # ============================================================
 # PAGE CONFIG & GLOBAL CSS
@@ -52,13 +53,13 @@ h3 { font-size: 0.95rem !important; font-weight: 600 !important; }
 [data-testid="stSidebar"] h1,
 [data-testid="stSidebar"] h2,
 [data-testid="stSidebar"] h3 { font-size: 0.78rem !important; text-transform: uppercase;
-    letter-spacing: 0.08em; opacity: 0.6; margin: 0.8rem 0 0.25rem; font-weight: 600 !important; }
+ letter-spacing: 0.08em; opacity: 0.6; margin: 0.8rem 0 0.25rem; font-weight: 600 !important; }
 
 /* ── Metric cards (Fixed for Light/Dark Mode) ── */
 [data-testid="stMetric"] { background: rgba(130, 130, 130, 0.1); border: 1px solid rgba(130, 130, 130, 0.2);
-    border-radius: 8px; padding: 10px 14px !important; }
+ border-radius: 8px; padding: 10px 14px !important; }
 [data-testid="stMetricLabel"] { font-size: 10px !important; opacity: 0.7 !important;
-    text-transform: uppercase; letter-spacing: 0.06em; }
+ text-transform: uppercase; letter-spacing: 0.06em; }
 [data-testid="stMetricValue"] { font-size: 1.4rem !important; font-weight: 700 !important; }
 
 /* ── Caption & info ── */
@@ -70,8 +71,8 @@ h3 { font-size: 0.95rem !important; font-weight: 600 !important; }
 
 /* ── Buttons ── */
 .stButton button, .stDownloadButton button {
-    font-size: 12px !important; padding: 6px 16px !important;
-    border-radius: 6px !important;
+ font-size: 12px !important; padding: 6px 16px !important;
+ border-radius: 6px !important;
 }
 
 /* ── Tab labels ── */
@@ -79,8 +80,8 @@ h3 { font-size: 0.95rem !important; font-weight: 600 !important; }
 
 /* ── Section divider helper ── */
 .section-label {
-    font-size: 10px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: 0.1em; opacity: 0.6; margin: 0 0 4px;
+ font-size: 10px; font-weight: 600; text-transform: uppercase;
+ letter-spacing: 0.1em; opacity: 0.6; margin: 0 0 4px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -93,12 +94,15 @@ h3 { font-size: 0.95rem !important; font-weight: 600 !important; }
 def beta1(fc):
     return 0.85 if fc <= 28 else max(0.65, 0.85 - 0.05 * (fc - 28) / 7)
 
+
 def get_Po(b, h, fc, fy, Ast):
     return 0.85 * fc * (b * h - Ast) + fy * Ast
+
 
 def check_rho_g(b, h, Ast):
     rho = Ast / (b * h)
     return round(rho * 100, 2), rho >= 0.01, rho <= 0.08
+
 
 def check_bar_fit(b, h, nw, nd, dia, cover, tie_d):
     min_clear = max(1.5 * dia, 40.0)
@@ -108,9 +112,11 @@ def check_bar_fit(b, h, nw, nd, dia, cover, tie_d):
     req_h = nd * dia + (nd - 1) * min_clear
     return req_w <= avail_w and req_h <= avail_h, round(req_w, 1), round(req_h, 1)
 
+
 def calculate_tie_spacing(b, h, long_dia, tie_d):
     s = min(16 * long_dia, 48 * tie_d, min(b, h))
     return int(math.floor(s / 25) * 25)
+
 
 def build_layers(depth, d_prime, n_width, n_depth, bar_area):
     layers = [{'area': n_width * bar_area, 'd': d_prime}]
@@ -120,6 +126,7 @@ def build_layers(depth, d_prime, n_width, n_depth, bar_area):
             layers.append({'area': 2 * bar_area, 'd': d_prime + i * spacing})
     layers.append({'area': n_width * bar_area, 'd': depth - d_prime})
     return layers
+
 
 def generate_pm_curve(width, depth, fc, fy, cover, n_width, n_depth, bar_dia, tie_d):
     b1 = beta1(fc)
@@ -150,10 +157,10 @@ def generate_pm_curve(width, depth, fc, fy, cover, n_width, n_depth, bar_dia, ti
             Ms += F * (depth / 2 - L['d'])
         Pn = Cc + Fs
         Mn = Mc + Ms
-        
+
         # Evaluate tensile strain correctly as a positive magnitude
         eps_t = ECU * (layers[-1]['d'] - c) / c
-        
+
         if eps_t <= ey:
             phi = PHI_TIED
         elif eps_t >= ey + 0.003:
@@ -168,6 +175,7 @@ def generate_pm_curve(width, depth, fc, fy, cover, n_width, n_depth, bar_dia, ti
     Pt = -(PHI_TENSION * Ast * fy) / 1_000
     points.append({'Moment_kNm': 0.0, 'Axial_kN': round(Pt, 1)})
     return pd.DataFrame(points)
+
 
 def get_dc_ratio(pm_df, P_demand, M_demand):
     P_max = pm_df['Axial_kN'].max()
@@ -200,6 +208,7 @@ def get_dc_ratio(pm_df, P_demand, M_demand):
         R_cap = R0 + t * (R1 - R0)
     return 9.99 if R_cap <= 0 else round(R_demand / R_cap, 3)
 
+
 def magnify_moment(Pu, Mu, width, depth, fc, lu, k, Cm, beta_dns):
     if Pu <= 0:
         return round(abs(Mu), 1), 1.0
@@ -218,15 +227,18 @@ def magnify_moment(Pu, Mu, width, depth, fc, lu, k, Cm, beta_dns):
     delta = max(Cm / (1 - Pu / (0.75 * Pc)), 1.0)
     return round(max(delta * Mu_eff, M_min), 1), round(delta, 3)
 
+
 def dynamic_alpha(Pu, Po_kN):
     if Pu <= 0 or Po_kN <= 0:
         return 1.15
     return round(min(max(1.15 + 0.35 * min(Pu / (PHI_TIED * Po_kN), 1.0), 1.15), 1.50), 3)
 
+
 def biaxial_pmm(dc2, dc3, alpha):
     if dc2 >= 9.0 or dc3 >= 9.0:
         return 9.99
     return round((dc2 ** alpha + dc3 ** alpha) ** (1 / alpha), 3)
+
 
 def column_shear_capacity(b, d, fc, Pu, Ag, fyt, Av, s):
     Nu = Pu * 1_000
@@ -234,6 +246,7 @@ def column_shear_capacity(b, d, fc, Pu, Ag, fyt, Av, s):
     Vs = (Av * fyt * d) / s if s > 0 else 0
     return {'phi_Vn_kN': round(PHI_SHEAR * (Vc + Vs) / 1_000, 1),
             'phi_Vc_kN': round(PHI_SHEAR * Vc / 1_000, 1)}
+
 
 def run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns, tie_d):
     Ag = b * h
@@ -269,6 +282,7 @@ def run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, bet
             return cfg
     return None
 
+
 def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
                max_ratio, max_combo, klu_r_2, klu_r_3, fig):
     pdf = FPDF()
@@ -285,12 +299,12 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
     def sec(t):
         pdf.set_font("Arial", 'B', 10)
         pdf.set_fill_color(235, 237, 240)
-        pdf.cell(W, 7, f"  {t}", ln=True, fill=True)
+        pdf.cell(W, 7, f" {t}", ln=True, fill=True)
         pdf.set_font("Arial", '', 10)
         pdf.ln(1)
 
     def row(lbl, val):
-        pdf.cell(75, 5, f"  {lbl}", border=0)
+        pdf.cell(75, 5, f" {lbl}", border=0)
         pdf.cell(W - 75, 5, str(val), ln=True)
 
     sec("Section")
@@ -304,20 +318,20 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
     row("Ties", tie_text)
     pdf.ln(2)
     sec("Slenderness")
-    row("klu/r axis-2 / axis-3", f"{round(klu_r_2,1)} / {round(klu_r_3,1)}")
+    row("klu/r axis-2 / axis-3", f"{round(klu_r_2, 1)} / {round(klu_r_3, 1)}")
     row("Slenderness limit", "34 (non-sway, conservative)")
     pdf.ln(2)
     sec("Result")
     status = "FAIL" if max_ratio > 1.0 else "PASS"
     pdf.set_text_color(*(180, 30, 30) if max_ratio > 1.0 else (20, 140, 60))
     pdf.set_font("Arial", 'B', 12)
-    pdf.cell(W, 7, f"  {status}   |   Biaxial PMM = {max_ratio}", ln=True)
+    pdf.cell(W, 7, f" {status} | Biaxial PMM = {max_ratio}", ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.set_font("Arial", '', 10)
     row("Governing combo", max_combo)
     pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(130, 130, 130)
-    pdf.cell(W, 5, "  * alpha = 1.15-1.50 dynamic; D/C via radial eccentricity interpolation", ln=True)
+    pdf.cell(W, 5, " * alpha = 1.15-1.50 dynamic; D/C via radial eccentricity interpolation", ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.ln(3)
     sec("P-M Interaction Diagram")
@@ -343,16 +357,16 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
 # ============================================================
 
 def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
-    BLUE   = "#1a6fad"
+    BLUE = "#1a6fad"
     ORANGE = "#e07b00"
-    GRAY   = "#c0c4cc"
+    GRAY = "#c0c4cc"
 
     fig, ax = plt.subplots(figsize=(6.5, 5.2), dpi=110)
     fig.patch.set_facecolor("white")
     ax.set_facecolor("#fafafa")
 
-    for pm, color, lbl in [(pm2, BLUE, "Axis-2  (M2-P)"),
-                           (pm3, ORANGE, "Axis-3  (M3-P)")]:
+    for pm, color, lbl in [(pm2, BLUE, "Axis-2 (M2-P)"),
+                           (pm3, ORANGE, "Axis-3 (M3-P)")]:
         s = pm.sort_values('Axial_kN').drop_duplicates()
         ax.plot(s['Moment_kNm'], s['Axial_kN'],
                 color=color, linewidth=2.2, label=lbl, zorder=3)
@@ -375,13 +389,13 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
                      label='M3 demands')
 
     gov_idx = df['PMM'].idxmax()
-    gov_M2  = df.loc[gov_idx, 'M2_Mag']
-    gov_M3  = df.loc[gov_idx, 'M3_Mag']
-    gov_P   = df.loc[gov_idx, 'P_Demand_kN']
+    gov_M2 = df.loc[gov_idx, 'M2_Mag']
+    gov_M3 = df.loc[gov_idx, 'M3_Mag']
+    gov_P = df.loc[gov_idx, 'P_Demand_kN']
     gov_pmm = df.loc[gov_idx, 'PMM']
     ax.scatter([gov_M2, gov_M3], [gov_P, gov_P],
                s=130, marker='*', color='#d00000', zorder=7,
-               label=f'Governing  PMM={gov_pmm:.3f}', edgecolors='white', linewidths=0.5)
+               label=f'Governing PMM={gov_pmm:.3f}', edgecolors='white', linewidths=0.5)
 
     ax.axhline(0, color='#333', linewidth=0.9, zorder=2)
     ax.axvline(0, color='#333', linewidth=0.9, zorder=2)
@@ -393,14 +407,14 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
     cbar.ax.tick_params(labelsize=7)
     cbar.ax.axhline(y=1.0, color='#d00000', linewidth=1.2, linestyle='--')
 
-    ax.set_xlabel("φMn  (kNm)", fontsize=9, labelpad=4)
-    ax.set_ylabel("φPn  (kN)",  fontsize=9, labelpad=4)
+    ax.set_xlabel("φMn (kNm)", fontsize=9, labelpad=4)
+    ax.set_ylabel("φPn (kN)", fontsize=9, labelpad=4)
     ax.tick_params(axis='both', labelsize=8, length=3)
     ax.xaxis.set_major_locator(mticker.MaxNLocator(6, integer=True))
     ax.yaxis.set_major_locator(mticker.MaxNLocator(7, integer=True))
 
     all_M = pd.concat([pm2['Moment_kNm'], pm3['Moment_kNm'], df['M2_Mag'], df['M3_Mag']])
-    all_P = pd.concat([pm2['Axial_kN'],   pm3['Axial_kN'],   df['P_Demand_kN']])
+    all_P = pd.concat([pm2['Axial_kN'], pm3['Axial_kN'], df['P_Demand_kN']])
     m_pad = (all_M.max() - all_M.min()) * 0.07
     p_pad = (all_P.max() - all_P.min()) * 0.07
     ax.set_xlim(-m_pad, all_M.max() + m_pad)
@@ -413,42 +427,128 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
               loc='lower right', handlelength=1.8,
               borderpad=0.6, labelspacing=0.4)
 
-    ax.set_title(f"{frame_id}   ·   {layout_text}",
+    ax.set_title(f"{frame_id} · {layout_text}",
                  fontsize=9, fontweight='600', pad=8, color='#333')
 
     plt.tight_layout(pad=0.8)
     return fig
 
 
+def batch_process_all_frames(df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
+                             lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns,
+                             auto_opt, nw, nd, bar_dia):
+    """
+    Process all frames in the CSV and return summary results.
+    """
+    results = []
+
+    unique_frames = df_raw['Frame'].unique()
+
+    for frame_id in unique_frames:
+        df = df_raw[df_raw['Frame'] == frame_id].copy()
+        df['Load_Combo'] = df['OutputCase']
+        df['P_Demand_kN'] = df['P'] * -1
+        df['M2_Demand_kNm'] = df['M2']
+        df['M3_Demand_kNm'] = df['M3']
+
+        # Determine rebar config
+        if auto_opt:
+            best = run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns, tie_d)
+            if best is None:
+                results.append({
+                    'Frame': frame_id,
+                    'Status': 'FAIL (Optimization Failed)',
+                    'PMM': 9.99,
+                    'Governing_Combo': 'N/A',
+                    'Rebar': 'N/A',
+                    'rho_g': 'N/A'
+                })
+                continue
+            total_bars = best['total_bars']
+            dia = best['dia']
+            n_w = best['nw']
+            n_d = best['nd']
+            Ast = best['Ast']
+            layout_text = f"{total_bars}-DB{dia} ({n_w}x{n_d})"
+            rho_pct = round(Ast / (b * h) * 100, 2)
+        else:
+            total_bars = 2 * nw + 2 * (nd - 2)
+            Ast = total_bars * math.pi * bar_dia ** 2 / 4
+            layout_text = f"{total_bars}-DB{bar_dia} ({nw}x{nd})"
+            rho_pct = round(Ast / (b * h) * 100, 2)
+            n_w, n_d = nw, nd
+            dia = bar_dia
+
+        # Calculate PMM
+        tie_spacing = calculate_tie_spacing(b, h, dia, tie_d)
+        pm2 = generate_pm_curve(h, b, fc, fy, cover, n_d, n_w, dia, tie_d)
+        pm3 = generate_pm_curve(b, h, fc, fy, cover, n_w, n_d, dia, tie_d)
+        Po_kN = get_Po(b, h, fc, fy, Ast) / 1_000
+
+        df[['M2_Mag', 'Delta_2']] = df.apply(
+            lambda r: pd.Series(
+                magnify_moment(r['P_Demand_kN'], r['M2_Demand_kNm'], h, b, fc, lu_2, k_2, Cm_2, beta_dns)),
+            axis=1)
+        df[['M3_Mag', 'Delta_3']] = df.apply(
+            lambda r: pd.Series(
+                magnify_moment(r['P_Demand_kN'], r['M3_Demand_kNm'], b, h, fc, lu_3, k_3, Cm_3, beta_dns)),
+            axis=1)
+
+        df['DC_2'] = df.apply(lambda r: get_dc_ratio(pm2, r['P_Demand_kN'], r['M2_Mag']), axis=1)
+        df['DC_3'] = df.apply(lambda r: get_dc_ratio(pm3, r['P_Demand_kN'], r['M3_Mag']), axis=1)
+        df['Alpha'] = df.apply(lambda r: dynamic_alpha(r['P_Demand_kN'], Po_kN), axis=1)
+        df['PMM'] = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), axis=1)
+
+        max_idx = df['PMM'].idxmax()
+        max_ratio = df.loc[max_idx, 'PMM']
+        max_combo = df.loc[max_idx, 'Load_Combo']
+
+        status = 'FAIL' if max_ratio > 1.0 else ('MARGINAL' if max_ratio > 0.90 else 'PASS')
+
+        results.append({
+            'Frame': frame_id,
+            'Status': status,
+            'PMM': round(max_ratio, 3),
+            'Governing_Combo': max_combo,
+            'Rebar': layout_text,
+            'rho_g (%)': rho_pct
+        })
+
+    return pd.DataFrame(results)
+
+
 # ============================================================
 # SAVE/LOAD STATE FUNCTIONS
 # ============================================================
+
 def save_state(state_data):
-    """Save current state to JSON file."""
-    os.makedirs(SAVE_DIR, exist_ok=True)
+    """Save current state to JSON file"""
+    if not os.path.exists(SAVE_DIR):
+        os.makedirs(SAVE_DIR)
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"rc_column_state_{timestamp}.json"
     filepath = os.path.join(SAVE_DIR, filename)
-    with open(filepath, "w", encoding="utf-8") as f:
+
+    with open(filepath, 'w') as f:
         json.dump(state_data, f, indent=2)
+
     return filepath
 
 
 def load_state(filepath):
-    """Load state from JSON file."""
-    with open(filepath, "r", encoding="utf-8") as f:
+    """Load state from JSON file"""
+    with open(filepath, 'r') as f:
         return json.load(f)
 
 
 def get_saved_files():
-    """Get list of saved state files."""
+    """Get list of saved state files"""
     if not os.path.exists(SAVE_DIR):
         return []
-    files = [
-        f for f in os.listdir(SAVE_DIR)
-        if f.startswith("rc_column_state_") and f.endswith(".json")
-    ]
-    files.sort(reverse=True)
+
+    files = [f for f in os.listdir(SAVE_DIR) if f.startswith('rc_column_state_') and f.endswith('.json')]
+    files.sort(reverse=True)  # Newest first
     return files
 
 
@@ -460,151 +560,157 @@ sb = st.sidebar
 # --- Save/Load State Section ---
 sb.markdown("### 💾 Save/Load State")
 
-if "saved_files" not in st.session_state:
+# Initialize session state for saved files list
+if 'saved_files' not in st.session_state:
     st.session_state.saved_files = get_saved_files()
 
-if sb.button("💾 Save Current State", key="save_state_btn"):
+# Save button
+if st.button("💾 Save Current State", key="save_state_btn"):
     state_to_save = {
-        "section": {
-            "b": st.session_state.get("b", 800),
-            "h": st.session_state.get("h", 800),
-            "fc": st.session_state.get("fc", 40),
-            "fy": st.session_state.get("fy", 500),
+        'section': {
+            'b': st.session_state.get('b', 800),
+            'h': st.session_state.get('h', 800),
+            'fc': st.session_state.get('fc', 40),
+            'fy': st.session_state.get('fy', 500),
         },
-        "ties": {
-            "tie_size": st.session_state.get("sel_tie", "DB10"),
-            "cover": st.session_state.get("cover", 40),
+        'ties': {
+            'tie_size': st.session_state.get('sel_tie', 'DB10'),
+            'cover': st.session_state.get('cover', 40),
         },
-        "longitudinal": {
-            "auto_opt": st.session_state.get("auto_opt", False),
-            "nw": st.session_state.get("nw", 4),
-            "nd": st.session_state.get("nd", 4),
-            "bar_size": st.session_state.get("sel_bar", "DB25"),
+        'longitudinal': {
+            'auto_opt': st.session_state.get('auto_opt', False),
+            'nw': st.session_state.get('nw', 4),
+            'nd': st.session_state.get('nd', 4),
+            'bar_size': st.session_state.get('sel_bar', 'DB25'),
         },
-        "slenderness": {
-            "lu_2": st.session_state.get("lu_2", 3000),
-            "lu_3": st.session_state.get("lu_3", 3000),
-            "k_2": st.session_state.get("k_2", 1.0),
-            "k_3": st.session_state.get("k_3", 1.0),
-            "Cm_2": st.session_state.get("Cm_2", 1.0),
-            "Cm_3": st.session_state.get("Cm_3", 1.0),
-            "beta_dns": st.session_state.get("beta_dns", 0.0),
+        'slenderness': {
+            'lu_2': st.session_state.get('lu_2', 3000),
+            'lu_3': st.session_state.get('lu_3', 3000),
+            'k_2': st.session_state.get('k_2', 1.0),
+            'k_3': st.session_state.get('k_3', 1.0),
+            'Cm_2': st.session_state.get('Cm_2', 1.0),
+            'Cm_3': st.session_state.get('Cm_3', 1.0),
+            'beta_dns': st.session_state.get('beta_dns', 0.0),
         },
-        "shear": {
-            "check_shear": st.session_state.get("check_shear", False),
-            "fyt_shear": st.session_state.get("fyt_shear", 400),
+        'shear': {
+            'check_shear': st.session_state.get('check_shear', False),
+            'fyt_shear': st.session_state.get('fyt_shear', 400),
         },
-        "design_mode": st.session_state.get("design_mode", "Single frame"),
-        "selected_frame": st.session_state.get("frame_id"),
-        "selected_frames": st.session_state.get("selected_frames", []),
-        "csv_path": st.session_state.get("csv_path"),
-        "timestamp": datetime.now().isoformat(),
+        'selected_frame': st.session_state.get('frame_id', None),
+        'csv_path': st.session_state.get('csv_path', None),
+        'timestamp': datetime.now().isoformat(),
     }
+
     filepath = save_state(state_to_save)
     st.session_state.saved_files = get_saved_files()
-    sb.success(f"Saved to: {os.path.basename(filepath)}")
+    st.success(f"Saved to: {filepath}")
 
+# Load section
 saved_files = get_saved_files()
 if saved_files:
-    file_options = {f: f.replace("rc_column_state_", "").replace(".json", "") for f in saved_files}
-    selected_file = sb.selectbox("Load saved state", list(file_options.keys()), format_func=lambda x: file_options[x], key="saved_state_file")
+    file_options = {f: f.replace('rc_column_state_', '').replace('.json', '') for f in saved_files}
+    selected_file = sb.selectbox("Load saved state", list(file_options.keys()), format_func=lambda x: file_options[x])
+
     if sb.button("📂 Load Selected State", key="load_state_btn"):
         filepath = os.path.join(SAVE_DIR, selected_file)
         try:
             loaded_data = load_state(filepath)
 
-            if "section" in loaded_data:
-                st.session_state.b = loaded_data["section"].get("b", 800)
-                st.session_state.h = loaded_data["section"].get("h", 800)
-                st.session_state.fc = loaded_data["section"].get("fc", 40)
-                st.session_state.fy = loaded_data["section"].get("fy", 500)
-            if "ties" in loaded_data:
-                st.session_state.sel_tie = loaded_data["ties"].get("tie_size", "DB10")
-                st.session_state.cover = loaded_data["ties"].get("cover", 40)
-            if "longitudinal" in loaded_data:
-                st.session_state.auto_opt = loaded_data["longitudinal"].get("auto_opt", False)
-                st.session_state.nw = loaded_data["longitudinal"].get("nw", 4)
-                st.session_state.nd = loaded_data["longitudinal"].get("nd", 4)
-                st.session_state.sel_bar = loaded_data["longitudinal"].get("bar_size", "DB25")
-            if "slenderness" in loaded_data:
-                st.session_state.lu_2 = loaded_data["slenderness"].get("lu_2", 3000)
-                st.session_state.lu_3 = loaded_data["slenderness"].get("lu_3", 3000)
-                st.session_state.k_2 = loaded_data["slenderness"].get("k_2", 1.0)
-                st.session_state.k_3 = loaded_data["slenderness"].get("k_3", 1.0)
-                st.session_state.Cm_2 = loaded_data["slenderness"].get("Cm_2", 1.0)
-                st.session_state.Cm_3 = loaded_data["slenderness"].get("Cm_3", 1.0)
-                st.session_state.beta_dns = loaded_data["slenderness"].get("beta_dns", 0.0)
-            if "shear" in loaded_data:
-                st.session_state.check_shear = loaded_data["shear"].get("check_shear", False)
-                st.session_state.fyt_shear = loaded_data["shear"].get("fyt_shear", 400)
+            # Override all session state values
+            if 'section' in loaded_data:
+                st.session_state.b = loaded_data['section']['b']
+                st.session_state.h = loaded_data['section']['h']
+                st.session_state.fc = loaded_data['section']['fc']
+                st.session_state.fy = loaded_data['section']['fy']
 
-            st.session_state.design_mode = loaded_data.get("design_mode", "Single frame")
-            if loaded_data.get("selected_frame") is not None:
-                st.session_state.frame_id = loaded_data.get("selected_frame")
-            st.session_state.selected_frames = loaded_data.get("selected_frames", [])
+            if 'ties' in loaded_data:
+                st.session_state.sel_tie = loaded_data['ties']['tie_size']
+                st.session_state.cover = loaded_data['ties']['cover']
 
-            csv_path = loaded_data.get("csv_path")
-            if csv_path:
-                st.session_state.csv_path = csv_path
+            if 'longitudinal' in loaded_data:
+                st.session_state.auto_opt = loaded_data['longitudinal']['auto_opt']
+                st.session_state.nw = loaded_data['longitudinal']['nw']
+                st.session_state.nd = loaded_data['longitudinal']['nd']
+                st.session_state.sel_bar = loaded_data['longitudinal']['bar_size']
 
-            sb.success(f"Loaded: {selected_file}")
+            if 'slenderness' in loaded_data:
+                st.session_state.lu_2 = loaded_data['slenderness']['lu_2']
+                st.session_state.lu_3 = loaded_data['slenderness']['lu_3']
+                st.session_state.k_2 = loaded_data['slenderness']['k_2']
+                st.session_state.k_3 = loaded_data['slenderness']['k_3']
+                st.session_state.Cm_2 = loaded_data['slenderness']['Cm_2']
+                st.session_state.Cm_3 = loaded_data['slenderness']['Cm_3']
+                st.session_state.beta_dns = loaded_data['slenderness']['beta_dns']
+
+            if 'shear' in loaded_data:
+                st.session_state.check_shear = loaded_data['shear']['check_shear']
+                st.session_state.fyt_shear = loaded_data['shear']['fyt_shear']
+
+            if 'selected_frame' in loaded_data and loaded_data['selected_frame']:
+                st.session_state.frame_id = loaded_data['selected_frame']
+
+            if 'csv_path' in loaded_data and loaded_data['csv_path']:
+                st.session_state.csv_path = loaded_data['csv_path']
+
+            st.success(f"Loaded: {selected_file}")
             st.rerun()
         except Exception as e:
-            sb.error(f"Error loading state: {e}")
+            st.error(f"Error loading state: {str(e)}")
 else:
     sb.info("No saved states found")
 
 sb.markdown("---")
 
+# --- Section Inputs ---
 sb.markdown("### Section")
-b  = sb.number_input("Width b (mm) - axis-2", value=st.session_state.get("b", 800), step=50, min_value=200, key="b")
-h  = sb.number_input("Depth h (mm) - axis-3", value=st.session_state.get("h", 800), step=50, min_value=200, key="h")
-fc = sb.number_input("f'c (MPa)", value=st.session_state.get("fc", 40), step=5, min_value=20, key="fc")
-fy = sb.number_input("fy  (MPa)", value=st.session_state.get("fy", 500), step=10, min_value=300, key="fy")
+b = sb.number_input("Width b (mm) - axis-2", value=st.session_state.get('b', 800), step=50, min_value=200, key='b')
+h = sb.number_input("Depth h (mm) - axis-3", value=st.session_state.get('h', 800), step=50, min_value=200, key='h')
+fc = sb.number_input("f'c (MPa)", value=st.session_state.get('fc', 40), step=5, min_value=20, key='fc')
+fy = sb.number_input("fy (MPa)", value=st.session_state.get('fy', 500), step=10, min_value=300, key='fy')
 
 sb.markdown("### Ties")
-tie_map  = {'RB9': 9, 'DB10': 10, 'DB12': 12}
-sel_tie  = sb.selectbox("Tie size", list(tie_map.keys()), index=1, key="sel_tie")
-tie_d    = tie_map[sel_tie]
-cover    = sb.number_input("Clear cover (mm)", value=st.session_state.get("cover", 40), step=5, min_value=20, key="cover")
+tie_map = {'RB9': 9, 'DB10': 10, 'DB12': 12}
+sel_tie = sb.selectbox("Tie size", list(tie_map.keys()), index=1, key='sel_tie')
+tie_d = tie_map[sel_tie]
+cover = sb.number_input("Clear cover (mm)", value=st.session_state.get('cover', 40), step=5, min_value=20, key='cover')
 
 sb.markdown("### Longitudinal")
-auto_opt = sb.checkbox("🚀 Auto-optimise", value=st.session_state.get("auto_opt", False), key="auto_opt")
-bar_map  = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
+auto_opt = sb.checkbox("🚀 Auto-optimise", value=st.session_state.get('auto_opt', False), key='auto_opt')
+bar_map = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
 
 if not auto_opt:
     col_a, col_b = sb.columns(2)
-    nw      = col_a.number_input("Bars (width)", value=st.session_state.get("nw", 4), step=1, min_value=2, key="nw")
-    nd      = col_b.number_input("Bars (depth)", value=st.session_state.get("nd", 4), step=1, min_value=2, key="nd")
-    sel_bar = sb.selectbox("Bar size", list(bar_map.keys()), index=2, key="sel_bar")
+    nw = col_a.number_input("Bars (width)", value=st.session_state.get('nw', 4), step=1, min_value=2, key='nw')
+    nd = col_b.number_input("Bars (depth)", value=st.session_state.get('nd', 4), step=1, min_value=2, key='nd')
+    sel_bar = sb.selectbox("Bar size", list(bar_map.keys()), index=2, key='sel_bar')
     bar_dia = bar_map[sel_bar]
     total_bars = 2 * nw + 2 * (nd - 2)
     Ast = total_bars * math.pi * bar_dia ** 2 / 4
     rho_pct, above_min, below_max = check_rho_g(b, h, Ast)
     fits, req_w, req_h = check_bar_fit(b, h, nw, nd, bar_dia, cover, tie_d)
     rho_icon = "✅" if above_min and below_max else "❌"
-    sb.markdown(f"**{total_bars} bars · {round(Ast,0):.0f} mm² · ρg {rho_pct}% {rho_icon}**")
+    sb.markdown(f"**{total_bars} bars · {round(Ast, 0):.0f} mm² · ρg {rho_pct}% {rho_icon}**")
     if not above_min: sb.error("ρg < 1% - ACI §10.6.1.1")
     if not below_max: sb.error("ρg > 8% - ACI §10.6.1.1")
-    if not fits:      sb.error(f"Bars don't fit - needs {req_w}/{req_h} mm")
+    if not fits: sb.error(f"Bars don't fit - needs {req_w}/{req_h} mm")
 
 sb.markdown("### Slenderness")
 c1, c2 = sb.columns(2)
-lu_2 = c1.number_input("lu-2 (mm)", value=st.session_state.get("lu_2", 3000), step=100, min_value=500, key="lu_2")
-lu_3 = c2.number_input("lu-3 (mm)", value=st.session_state.get("lu_3", 3000), step=100, min_value=500, key="lu_3")
+lu_2 = c1.number_input("lu-2 (mm)", value=st.session_state.get('lu_2', 3000), step=100, min_value=500, key='lu_2')
+lu_3 = c2.number_input("lu-3 (mm)", value=st.session_state.get('lu_3', 3000), step=100, min_value=500, key='lu_3')
 c3, c4 = sb.columns(2)
-k_2 = c3.number_input("k (axis 2)", value=st.session_state.get("k_2", 1.0), step=0.05, min_value=0.5, key="k_2")
-k_3 = c4.number_input("k (axis 3)", value=st.session_state.get("k_3", 1.0), step=0.05, min_value=0.5, key="k_3")
-sb.caption("Cm = 0.6-0.4·(M1/M2)  - use 1.0 if unknown")
+k_2 = c3.number_input("k (axis 2)", value=st.session_state.get('k_2', 1.0), step=0.05, min_value=0.5, key='k_2')
+k_3 = c4.number_input("k (axis 3)", value=st.session_state.get('k_3', 1.0), step=0.05, min_value=0.5, key='k_3')
+sb.caption("Cm = 0.6-0.4·(M1/M2) - use 1.0 if unknown")
 c5, c6 = sb.columns(2)
-Cm_2 = c5.slider("Cm-2", 0.20, 1.00, st.session_state.get("Cm_2", 1.00), 0.05, key="Cm_2")
-Cm_3 = c6.slider("Cm-3", 0.20, 1.00, st.session_state.get("Cm_3", 1.00), 0.05, key="Cm_3")
-beta_dns = sb.slider("βdns", 0.0, 1.0, st.session_state.get("beta_dns", 0.0), 0.05, key="beta_dns")
+Cm_2 = c5.slider("Cm-2", 0.20, 1.00, st.session_state.get('Cm_2', 1.00), 0.05, key='Cm_2')
+Cm_3 = c6.slider("Cm-3", 0.20, 1.00, st.session_state.get('Cm_3', 1.00), 0.05, key='Cm_3')
+beta_dns = sb.slider("βdns", 0.0, 1.0, st.session_state.get('beta_dns', 0.0), 0.05, key='beta_dns')
 
 sb.markdown("### Shear (optional)")
-check_shear = sb.checkbox("Check shear capacity", value=st.session_state.get("check_shear", False), key="check_shear")
-fyt_shear = sb.number_input("Tie fy for shear (MPa)", value=st.session_state.get("fyt_shear", 400), step=10, min_value=250, key="fyt_shear") if check_shear else 400
-
+check_shear = sb.checkbox("Check shear capacity", value=st.session_state.get('check_shear', False), key='check_shear')
+fyt_shear = sb.number_input("Tie fy for shear (MPa)", value=st.session_state.get('fyt_shear', 400), step=10,
+                            min_value=250, key='fyt_shear') if check_shear else 400
 
 # ============================================================
 # MAIN AREA - HEADER
@@ -617,27 +723,31 @@ st.warning("**Scope:** Non-sway frames only. Seismic (Ch. 18) not checked. Preli
 # FILE UPLOAD
 # ============================================================
 uploaded = st.file_uploader("Upload SAP2000 frame-forces CSV", type=["csv"],
-                             label_visibility="collapsed",
-                             help="Expected columns: Frame, OutputCase, P, M2, M3")
+                            label_visibility="collapsed",
+                            help="Expected columns: Frame, OutputCase, P, M2, M3")
 
+# Handle CSV path from loaded state
 loaded_from_state = False
-if uploaded is None and st.session_state.get("csv_path") and os.path.exists(st.session_state.csv_path):
+if uploaded is None and st.session_state.get('csv_path') and os.path.exists(st.session_state.csv_path):
     try:
-        uploaded = open(st.session_state.csv_path, "rb")
+        uploaded = open(st.session_state.csv_path, 'rb')
         loaded_from_state = True
-    except OSError:
-        loaded_from_state = False
+    except:
+        pass
 
 if uploaded is None:
-    st.info("Upload a SAP2000 frame-forces CSV to begin.  Required columns: Frame, OutputCase, P, M2, M3.")
+    st.info("Upload a SAP2000 frame-forces CSV to begin. Required columns: Frame, OutputCase, P, M2, M3.")
     st.stop()
 
-if not loaded_from_state and hasattr(uploaded, "name") and hasattr(uploaded, "getvalue"):
-    os.makedirs(SAVE_DIR, exist_ok=True)
-    safe_name = os.path.basename(uploaded.name)
-    st.session_state.csv_path = os.path.join(SAVE_DIR, safe_name)
-    with open(st.session_state.csv_path, "wb") as f:
+# Save CSV path for later (only if freshly uploaded, not loaded from state)
+if not loaded_from_state and hasattr(uploaded, 'name') and hasattr(uploaded, 'getvalue'):
+    st.session_state.csv_path = os.path.join(SAVE_DIR, uploaded.name)
+    # Save a copy of the CSV for persistence
+    with open(st.session_state.csv_path, 'wb') as f:
         f.write(uploaded.getvalue())
+elif loaded_from_state:
+    # Already loaded from saved path, just keep it
+    pass
 
 df_raw = pd.read_csv(uploaded)
 if 'Frame' in df_raw.columns:
@@ -651,39 +761,16 @@ if 'Frame' not in df_raw.columns:
     st.error("CSV must contain a 'Frame' column.")
     st.stop()
 
-sb.markdown("### Select column(s)")
-unique_frames = sorted(df_raw['Frame'].dropna().unique().tolist())
-design_mode = sb.radio("Design mode", ["Single frame", "Grouping"], index=0 if st.session_state.get("design_mode", "Single frame") == "Single frame" else 1, horizontal=False, key="design_mode")
+sb.markdown("### Select column")
+frame_id = sb.selectbox("Frame", df_raw['Frame'].unique(), key='frame_id')
 
-if design_mode == "Single frame":
-    frame_id = sb.selectbox("Frame", unique_frames, key="frame_id")
-    selected_frames = [frame_id]
-    st.session_state.selected_frames = selected_frames
-    selection_label = f"Frame {frame_id}"
-else:
-    default_group = unique_frames[:2] if len(unique_frames) >= 2 else unique_frames
-    selected_frames = sb.multiselect(
-        "Frames in group",
-        unique_frames,
-        default=st.session_state.get("selected_frames", default_group),
-        key="selected_frames",
-        help="All selected frames are checked together using one reinforcement layout."
-    )
-    if not selected_frames:
-        st.error("Select at least one frame for grouping mode.")
-        st.stop()
-    frame_id = "GROUP"
-    selection_label = f"Group ({len(selected_frames)} frames)"
-
-df = df_raw[df_raw['Frame'].isin(selected_frames)].copy()
-df['Load_Combo']     = df['OutputCase']
-df['P_Demand_kN']   = df['P'] * -1
+df = df_raw[df_raw['Frame'] == frame_id].copy()
+df['Load_Combo'] = df['OutputCase']
+df['P_Demand_kN'] = df['P'] * -1
 df['M2_Demand_kNm'] = df['M2']
 df['M3_Demand_kNm'] = df['M3']
 
 st.caption("⚠️ SAP2000 sign: P is negated (compression -> positive). Verify before use.")
-if len(selected_frames) > 1:
-    st.caption(f"📦 Grouping active: {', '.join(map(str, selected_frames))}")
 
 # ============================================================
 # AUTO-OPTIMISE
@@ -691,14 +778,14 @@ if len(selected_frames) > 1:
 if auto_opt:
     with st.spinner("Optimising rebar grid…"):
         best = run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns, tie_d)
-    if best is None:
-        st.error("Optimisation failed - section cannot satisfy demands within 1-8% ρg.")
-        st.stop()
-    nw, nd, bar_dia = best['nw'], best['nd'], best['dia']
-    Ast = best['Ast']
-    total_bars = best['total_bars']
-    rho_pct = round(Ast / (b * h) * 100, 2)
-    st.success(f"Optimised: **{best['label']}** ·  ρg = {rho_pct}%")
+        if best is None:
+            st.error("Optimisation failed - section cannot satisfy demands within 1-8% ρg.")
+            st.stop()
+        nw, nd, bar_dia = best['nw'], best['nd'], best['dia']
+        Ast = best['Ast']
+        total_bars = best['total_bars']
+        rho_pct = round(Ast / (b * h) * 100, 2)
+        st.success(f"Optimised: **{best['label']}** · ρg = {rho_pct}%")
 else:
     if not fits:
         st.error("Fix bar-fit error in sidebar.")
@@ -712,30 +799,32 @@ else:
 # ============================================================
 tie_spacing = calculate_tie_spacing(b, h, bar_dia, tie_d)
 layout_text = f"{total_bars}-DB{bar_dia} ({nw}x{nd})"
-tie_text    = f"{sel_tie} @ {tie_spacing} mm"
+tie_text = f"{sel_tie} @ {tie_spacing} mm"
 
 r2 = 0.3 * b
 r3 = 0.3 * h
 klu_r_2 = (k_2 * lu_2) / r2
 klu_r_3 = (k_3 * lu_3) / r3
 
-df[['M2_Mag','Delta_2']] = df.apply(
-    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M2_Demand_kNm'], h, b, fc, lu_2, k_2, Cm_2, beta_dns)), axis=1)
-df[['M3_Mag','Delta_3']] = df.apply(
-    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M3_Demand_kNm'], b, h, fc, lu_3, k_3, Cm_3, beta_dns)), axis=1)
+df[['M2_Mag', 'Delta_2']] = df.apply(
+    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M2_Demand_kNm'], h, b, fc, lu_2, k_2, Cm_2, beta_dns)),
+    axis=1)
+df[['M3_Mag', 'Delta_3']] = df.apply(
+    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M3_Demand_kNm'], b, h, fc, lu_3, k_3, Cm_3, beta_dns)),
+    axis=1)
 
 pm2 = generate_pm_curve(h, b, fc, fy, cover, nd, nw, bar_dia, tie_d)
 pm3 = generate_pm_curve(b, h, fc, fy, cover, nw, nd, bar_dia, tie_d)
 Po_kN = get_Po(b, h, fc, fy, Ast) / 1_000
 
-df['DC_2']  = df.apply(lambda r: get_dc_ratio(pm2, r['P_Demand_kN'], r['M2_Mag']), axis=1)
-df['DC_3']  = df.apply(lambda r: get_dc_ratio(pm3, r['P_Demand_kN'], r['M3_Mag']), axis=1)
+df['DC_2'] = df.apply(lambda r: get_dc_ratio(pm2, r['P_Demand_kN'], r['M2_Mag']), axis=1)
+df['DC_3'] = df.apply(lambda r: get_dc_ratio(pm3, r['P_Demand_kN'], r['M3_Mag']), axis=1)
 df['Alpha'] = df.apply(lambda r: dynamic_alpha(r['P_Demand_kN'], Po_kN), axis=1)
-df['PMM']   = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), axis=1)
+df['PMM'] = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), axis=1)
 
-max_idx   = df['PMM'].idxmax()
+max_idx = df['PMM'].idxmax()
 max_ratio = df.loc[max_idx, 'PMM']
-max_combo = f"{df.loc[max_idx, 'Frame']} · {df.loc[max_idx, 'Load_Combo']}"
+max_combo = df.loc[max_idx, 'Load_Combo']
 
 # Shear
 shear_info = {}
@@ -750,8 +839,8 @@ if check_shear and 'V2' in df.columns:
     V2_max = df['V2'].abs().max()
     V3_max = df['V3'].abs().max() if 'V3' in df.columns else 0
     shear_info = {
-        'V2_max': round(V2_max,1), 'phi_Vn2': sv2['phi_Vn_kN'],
-        'V3_max': round(V3_max,1), 'phi_Vn3': sv3['phi_Vn_kN'],
+        'V2_max': round(V2_max, 1), 'phi_Vn2': sv2['phi_Vn_kN'],
+        'V3_max': round(V3_max, 1), 'phi_Vn3': sv2['phi_Vn_kN'],
         'pass2': V2_max <= sv2['phi_Vn_kN'],
         'pass3': V3_max <= sv3['phi_Vn_kN'],
     }
@@ -765,34 +854,34 @@ st.markdown("---")
 m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("PMM ratio", max_ratio)
 m2.metric("ρg", f"{rho_pct}%")
-m3.metric("klu/r  (2)", round(klu_r_2,1))
-m4.metric("klu/r  (3)", round(klu_r_3,1))
+m3.metric("klu/r (2)", round(klu_r_2, 1))
+m4.metric("klu/r (3)", round(klu_r_3, 1))
 m5.metric("Tie spacing", f"{tie_spacing} mm")
 m6.metric("Total bars", total_bars)
 
 # ── Status banner ──────────────────────────────────────────
 if max_ratio > 1.0:
-    st.error(f"**FAIL** - {selection_label} · PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
+    st.error(f"**FAIL** - PMM {max_ratio} · {max_combo} · {layout_text}")
 elif max_ratio > 0.90:
-    st.warning(f"**MARGINAL** - {selection_label} · PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}")
+    st.warning(f"**MARGINAL** - PMM {max_ratio} · {max_combo} · {layout_text}")
 else:
-    st.success(f"**PASS** - {selection_label} · PMM {max_ratio}  ·  {max_combo}  ·  {layout_text}  ·  Ties: {tie_text}")
+    st.success(f"**PASS** - PMM {max_ratio} · {max_combo} · {layout_text} · Ties: {tie_text}")
 
 # ── Slenderness warnings ────────────────────────────────────
 max_delta = max(df['Delta_2'].max(), df['Delta_3'].max())
 for axis, klu_r in [("axis-2", klu_r_2), ("axis-3", klu_r_3)]:
     if klu_r > 100:
-        st.error(f"klu/r = {round(klu_r,1)} ({axis}) - extremely slender. Use second-order analysis.")
+        st.error(f"klu/r = {round(klu_r, 1)} ({axis}) - extremely slender. Use second-order analysis.")
     elif klu_r > 34:
-        st.warning(f"klu/r = {round(klu_r,1)} ({axis}) - slender; magnification applied.")
+        st.warning(f"klu/r = {round(klu_r, 1)} ({axis}) - slender; magnification applied.")
 if max_delta >= 990:
     st.error("**BUCKLING FAILURE** - Pu ≥ 0.75·Pc. Increase section or reduce lu.")
 elif max_delta > 1.4:
-    st.warning(f"Max δ = {round(max_delta,2)} > 1.4 - significant slenderness amplification.")
+    st.warning(f"Max δ = {round(max_delta, 2)} > 1.4 - significant slenderness amplification.")
 
 # ── Shear check ────────────────────────────────────────────
 if shear_info:
-    st.markdown("**Shear  (ACI §22.5.6.1)**")
+    st.markdown("**Shear (ACI §22.5.6.1)**")
     sh1, sh2 = st.columns(2)
     sh1.metric(f"{'✅' if shear_info['pass2'] else '❌'} φVn (axis-2)",
                f"{shear_info['phi_Vn2']} kN", f"Vu = {shear_info['V2_max']} kN")
@@ -809,7 +898,7 @@ chart_col, table_col = st.columns([5, 7])
 with chart_col:
     st.markdown("**P-M Interaction Diagram**")
     st.caption("Both axes plotted · demand colour = PMM ratio · ★ = governing combo")
-    fig = make_pmm_chart(pm2, pm3, df, selection_label, layout_text)
+    fig = make_pmm_chart(pm2, pm3, df, frame_id, layout_text)
     st.pyplot(fig, use_container_width=True)
     st.caption(
         "ℹ️ Biaxial: PCA Load Contour $(DC_2)^α+(DC_3)^α=1$, "
@@ -819,34 +908,144 @@ with chart_col:
 
 with table_col:
     st.markdown("**Load-combination results**")
-    disp = ['Frame','Load_Combo','P_Demand_kN','M2_Mag','Delta_2','DC_2','M3_Mag','Delta_3','DC_3','Alpha','PMM']
+    disp = ['Load_Combo', 'P_Demand_kN', 'M2_Mag', 'Delta_2', 'DC_2', 'M3_Mag', 'Delta_3', 'DC_3', 'Alpha', 'PMM']
+
 
     def _hl_d(v):
-        if isinstance(v, (int,float)):
+        if isinstance(v, (int, float)):
             if v >= 990: return 'background:#6b0000;color:white'
-            if v > 1.4:  return 'background:#ffe0e0;color:#900'
+            if v > 1.4: return 'background:#ffe0e0;color:#900'
         return ''
 
+
     def _hl_pmm(v):
-        if isinstance(v, (int,float)):
+        if isinstance(v, (int, float)):
             if v > 1.0: return 'background:#6b0000;color:white;font-weight:bold'
             if v > 0.9: return 'background:#fff0c0;color:#7a5000'
         return ''
 
+
     styled = (df[disp].style
-              .map(_hl_d,   subset=['Delta_2','Delta_3'])
+              .map(_hl_d, subset=['Delta_2', 'Delta_3'])
               .map(_hl_pmm, subset=['PMM'])
-              .format({'P_Demand_kN':'{:.1f}','M2_Mag':'{:.1f}','M3_Mag':'{:.1f}',
-                       'Delta_2':'{:.3f}','Delta_3':'{:.3f}',
-                       'DC_2':'{:.3f}','DC_3':'{:.3f}',
-                       'Alpha':'{:.2f}','PMM':'{:.3f}'}))
+              .format({'P_Demand_kN': '{:.1f}', 'M2_Mag': '{:.1f}', 'M3_Mag': '{:.1f}',
+                       'Delta_2': '{:.3f}', 'Delta_3': '{:.3f}',
+                       'DC_2': '{:.3f}', 'DC_3': '{:.3f}',
+                       'Alpha': '{:.2f}', 'PMM': '{:.3f}'}))
     st.dataframe(styled, use_container_width=True, height=420)
 
 # ── PDF export ─────────────────────────────────────────────
 st.markdown("---")
 pdf_col, _ = st.columns([2, 5])
 with pdf_col:
-    pdf_bytes = create_pdf(selection_label, b, h, fc, fy, layout_text, tie_text,
+    pdf_bytes = create_pdf(frame_id, b, h, fc, fy, layout_text, tie_text,
                            rho_pct, max_ratio, max_combo, klu_r_2, klu_r_3, fig)
     st.download_button("📥 Download PDF report", data=pdf_bytes,
                        file_name=f"Column_{frame_id}.pdf", mime="application/pdf")
+
+# ============================================================
+# BATCH PROCESS ALL FRAMES
+# ============================================================
+st.markdown("---")
+st.markdown("## 📊 Batch Process All Frames")
+st.caption("Run design checks on every frame in the CSV at once")
+
+if st.button("🚀 Run Batch Analysis", type="primary", key="batch_run_btn"):
+    with st.spinner(f"Processing {len(df_raw['Frame'].unique())} frames..."):
+        batch_results = batch_process_all_frames(
+            df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
+            lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns,
+            auto_opt, nw, nd, bar_dia
+        )
+
+        # Store results in session state
+        st.session_state.batch_results = batch_results
+        st.success(f"✅ Processed {len(batch_results)} frames!")
+
+# Display batch results if available
+if 'batch_results' in st.session_state:
+    batch_df = st.session_state.batch_results
+
+    # Summary metrics
+    total = len(batch_df)
+    passed = len(batch_df[batch_df['Status'] == 'PASS'])
+    marginal = len(batch_df[batch_df['Status'] == 'MARGINAL'])
+    failed = len(batch_df[batch_df['Status'].str.contains('FAIL')])
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Total Frames", total)
+    m2.metric("✅ PASS", passed)
+    m3.metric("⚠️ MARGINAL", marginal)
+    m4.metric("❌ FAIL", failed)
+
+    # Color-code the summary
+    if failed > 0:
+        m4.error(f"❌ FAIL: {failed}")
+    elif marginal > 0:
+        m3.warning(f"⚠️ MARGINAL: {marginal}")
+    else:
+        m2.success(f"✅ ALL PASS!")
+
+    st.markdown("### 📋 Frame Summary Table")
+
+
+    # Style the batch results
+    def style_status(val):
+        if 'FAIL' in val:
+            return 'background:#6b0000;color:white;font-weight:bold'
+        elif val == 'MARGINAL':
+            return 'background:#fff0c0;color:#7a5000'
+        elif val == 'PASS':
+            return 'background:#d4edda;color:#155724'
+        return ''
+
+
+    styled_batch = (batch_df.style
+                    .map(style_status, subset=['Status'])
+                    .format({'PMM': '{:.3f}', 'rho_g (%)': '{:.2f}'}))
+
+    st.dataframe(styled_batch, use_container_width=True, height=400)
+
+    # Export options
+    st.markdown("### 📥 Export Results")
+    exp_col1, exp_col2, exp_col3 = st.columns(3)
+
+    with exp_col1:
+        # CSV export
+        csv_bytes = batch_df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📄 Download CSV",
+            data=csv_bytes,
+            file_name="column_batch_summary.csv",
+            mime="text/csv"
+        )
+
+    with exp_col2:
+        # Excel export
+        try:
+            output = BytesIO()
+            with pd.ExcelWriter(output, engine='openpyxl') as writer:
+                batch_df.to_excel(writer, index=False, sheet_name='Summary')
+            excel_bytes = output.getvalue()
+            st.download_button(
+                "📊 Download Excel",
+                data=excel_bytes,
+                file_name="column_batch_summary.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+        except ImportError:
+            st.info("Install openpyxl for Excel export: `pip install openpyxl`")
+
+    with exp_col3:
+        # Failed frames only
+        failed_df = batch_df[batch_df['Status'].str.contains('FAIL')]
+        if len(failed_df) > 0:
+            failed_csv = failed_df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                "⚠️ Failed Only",
+                data=failed_csv,
+                file_name="failed_frames.csv",
+                mime="text/csv"
+            )
+        else:
+            st.button("⚠️ Failed Only", disabled=True)
