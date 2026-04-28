@@ -741,7 +741,8 @@ if uploaded is None:
 
 # Save CSV path for later (only if freshly uploaded, not loaded from state)
 if not loaded_from_state and hasattr(uploaded, 'name') and hasattr(uploaded, 'getvalue'):
-    st.session_state.csv_path = os.path.join(SAVE_DIR, uploaded.name)
+    # st.session_state.csv_path = os.path.join(SAVE_DIR, uploaded.name)
+    st.session_state.csv_path = r"D:\Backup\_Project\New folder\Load.csv"
     # Save a copy of the CSV for persistence
     with open(st.session_state.csv_path, 'wb') as f:
         f.write(uploaded.getvalue())
