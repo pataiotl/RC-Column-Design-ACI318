@@ -9,8 +9,12 @@ from fpdf import FPDF
 import tempfile
 import os
 import json
+import re
 from datetime import datetime
 from io import BytesIO
+from pathlib import Path
+import openpyxl
+from openpyxl import Workbook
 
 # ============================================================
 # CONSTANTS
@@ -22,7 +26,8 @@ PHI_TENSION = 0.90  # ACI Table 21.2.1 - tension-controlled
 PHI_SHEAR = 0.75  # ACI §21.2.1
 
 # Save/Load directory
-SAVE_DIR = r"D:\Backup\_Project\New folder"
+APP_DIR = Path(__file__).resolve().parent
+SAVE_DIR = APP_DIR / "saved_states"
 
 # ============================================================
 # PAGE CONFIG & GLOBAL CSS
@@ -248,6 +253,67 @@ def column_shear_capacity(b, d, fc, Pu, Ag, fyt, Av, s):
             'phi_Vc_kN': round(PHI_SHEAR * Vc / 1_000, 1)}
 
 
+def ensure_save_dir():
+    SAVE_DIR.mkdir(parents=True, exist_ok=True)
+    return SAVE_DIR
+
+
+def prepare_frame_demands(df):
+    df = df.copy()
+    df['Load_Combo'] = df['OutputCase']
+    df['P_Demand_kN'] = df['P'] * -1
+    df['M2_Demand_kNm'] = df['M2']
+    df['M3_Demand_kNm'] = df['M3']
+    return df
+
+
+def evaluate_frame_demands(df, pm2, pm3, Po_kN, b, h, fc,
+                           lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns):
+    df = df.copy()
+    df[['M2_Mag', 'Delta_2']] = df.apply(
+        lambda r: pd.Series(magnify_moment(
+            r['P_Demand_kN'], r['M2_Demand_kNm'], h, b, fc, lu_2, k_2, Cm_2, beta_dns
+        )),
+        axis=1)
+    df[['M3_Mag', 'Delta_3']] = df.apply(
+        lambda r: pd.Series(magnify_moment(
+            r['P_Demand_kN'], r['M3_Demand_kNm'], b, h, fc, lu_3, k_3, Cm_3, beta_dns
+        )),
+        axis=1)
+    df['DC_2'] = df.apply(lambda r: get_dc_ratio(pm2, r['P_Demand_kN'], r['M2_Mag']), axis=1)
+    df['DC_3'] = df.apply(lambda r: get_dc_ratio(pm3, r['P_Demand_kN'], r['M3_Mag']), axis=1)
+    df['Alpha'] = df.apply(lambda r: dynamic_alpha(r['P_Demand_kN'], Po_kN), axis=1)
+    df['PMM'] = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), axis=1)
+    return df
+
+
+def infer_group_name(frame):
+    frame_text = str(frame).strip()
+    match = re.match(r'^([A-Za-z]+)', frame_text)
+    return match.group(1) if match else frame_text
+
+
+def normalize_group_name(group_name, frame):
+    group_text = str(group_name).strip() if group_name is not None else ""
+    return group_text or infer_group_name(frame)
+
+
+def sync_group_assignments(frames, existing_assignments=None):
+    synced = {}
+    existing_assignments = existing_assignments or {}
+    for frame in frames:
+        existing_group = existing_assignments.get(frame)
+        synced[frame] = normalize_group_name(existing_group, frame)
+    return synced
+
+
+def get_grouped_frames(group_assignments):
+    grouped = {}
+    for frame, group_name in group_assignments.items():
+        grouped.setdefault(group_name, []).append(frame)
+    return [(group_name, grouped[group_name]) for group_name in sorted(grouped)]
+
+
 def run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns, tie_d):
     Ag = b * h
     bars = {'DB16': 16, 'DB20': 20, 'DB25': 25, 'DB28': 28, 'DB32': 32}
@@ -283,13 +349,13 @@ def run_optimizer(df, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, bet
     return None
 
 
-def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
-               max_ratio, max_combo, klu_r_2, klu_r_3, fig):
+def create_pdf(subject_name, b, h, fc, fy, layout_text, tie_text, rho_g,
+               max_ratio, max_combo, klu_r_2, klu_r_3, fig, governing_frame=None):
     pdf = FPDF()
     pdf.add_page()
     W = 190
     pdf.set_font("Arial", 'B', 14)
-    pdf.cell(W, 9, f"RC Column Design - Frame: {frame_name}", ln=True, align='C')
+    pdf.cell(W, 9, f"RC Column Design - {subject_name}", ln=True, align='C')
     pdf.set_font("Arial", '', 8)
     pdf.set_text_color(130, 130, 130)
     pdf.cell(W, 5, "ACI 318-19 | Non-sway | PCA Load Contour biaxial | Radial D/C interpolation", ln=True, align='C')
@@ -328,6 +394,8 @@ def create_pdf(frame_name, b, h, fc, fy, layout_text, tie_text, rho_g,
     pdf.cell(W, 7, f" {status} | Biaxial PMM = {max_ratio}", ln=True)
     pdf.set_text_color(0, 0, 0)
     pdf.set_font("Arial", '', 10)
+    if governing_frame is not None:
+        row("Governing frame", governing_frame)
     row("Governing combo", max_combo)
     pdf.set_font("Arial", 'I', 8)
     pdf.set_text_color(130, 130, 130)
@@ -434,6 +502,90 @@ def make_pmm_chart(pm2, pm3, df, frame_id, layout_text):
     return fig
 
 
+def batch_process_with_groups(df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
+                              lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns,
+                              auto_opt, nw, nd, bar_dia, group_assignments):
+    """
+    Process frames grouped by user-defined groups.
+    All load combinations from all frames in a group are considered together.
+    Returns one design per group based on worst-case demands.
+    """
+    results = []
+
+    for group_name, frames_in_group in get_grouped_frames(group_assignments):
+        # Combine all load data from all frames in the group
+        df_group = prepare_frame_demands(df_raw[df_raw['Frame'].isin(frames_in_group)])
+        if df_group.empty:
+            continue
+
+        # Determine rebar config for the group (using worst-case)
+        if auto_opt:
+            best = run_optimizer(df_group, b, h, fc, fy, cover, lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns, tie_d)
+            if best is None:
+                results.append({
+                    'Group': group_name,
+                    'Frames': ', '.join(map(str, frames_in_group)),
+                    'Status': 'FAIL (Optimization Failed)',
+                    'PMM': 9.99,
+                    'Governing_Combo': 'N/A',
+                    'Rebar': 'N/A',
+                    'rho_g': 'N/A'
+                })
+                continue
+            total_bars = best['total_bars']
+            dia = best['dia']
+            n_w = best['nw']
+            n_d = best['nd']
+            Ast = best['Ast']
+            layout_text = f"{total_bars}-DB{dia} ({n_w}x{n_d})"
+            rho_pct = round(Ast / (b * h) * 100, 2)
+        else:
+            total_bars = 2 * nw + 2 * (nd - 2)
+            Ast = total_bars * math.pi * bar_dia ** 2 / 4
+            layout_text = f"{total_bars}-DB{bar_dia} ({nw}x{nd})"
+            rho_pct = round(Ast / (b * h) * 100, 2)
+            n_w, n_d = nw, nd
+            dia = bar_dia
+
+        # Calculate PMM for all loads in the group
+        tie_spacing = calculate_tie_spacing(b, h, dia, tie_d)
+        pm2 = generate_pm_curve(h, b, fc, fy, cover, n_d, n_w, dia, tie_d)
+        pm3 = generate_pm_curve(b, h, fc, fy, cover, n_w, n_d, dia, tie_d)
+        Po_kN = get_Po(b, h, fc, fy, Ast) / 1_000
+
+        df_group = evaluate_frame_demands(
+            df_group, pm2, pm3, Po_kN, b, h, fc,
+            lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns
+        )
+
+        max_idx = df_group['PMM'].idxmax()
+        max_ratio = df_group.loc[max_idx, 'PMM']
+        max_combo = df_group.loc[max_idx, 'OutputCase']
+        worst_frame = df_group.loc[max_idx, 'Frame']
+
+        # Determine status
+        if max_ratio > 1.0:
+            status = 'FAIL'
+        elif max_ratio > 0.90:
+            status = 'MARGINAL'
+        else:
+            status = 'PASS'
+
+        results.append({
+            'Group': group_name,
+            'Frames': ', '.join(map(str, frames_in_group)),
+            'Status': status,
+            'PMM': round(max_ratio, 3),
+            'Governing_Combo': max_combo,
+            'Governing_Frame': worst_frame,
+            'Rebar': layout_text,
+            'rho_g (%)': rho_pct,
+            'Tie_spacing': f"{tie_spacing} mm"
+        })
+
+    return pd.DataFrame(results)
+
+
 def batch_process_all_frames(df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
                              lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns,
                              auto_opt, nw, nd, bar_dia):
@@ -445,11 +597,7 @@ def batch_process_all_frames(df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
     unique_frames = df_raw['Frame'].unique()
 
     for frame_id in unique_frames:
-        df = df_raw[df_raw['Frame'] == frame_id].copy()
-        df['Load_Combo'] = df['OutputCase']
-        df['P_Demand_kN'] = df['P'] * -1
-        df['M2_Demand_kNm'] = df['M2']
-        df['M3_Demand_kNm'] = df['M3']
+        df = prepare_frame_demands(df_raw[df_raw['Frame'] == frame_id])
 
         # Determine rebar config
         if auto_opt:
@@ -485,19 +633,10 @@ def batch_process_all_frames(df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
         pm3 = generate_pm_curve(b, h, fc, fy, cover, n_w, n_d, dia, tie_d)
         Po_kN = get_Po(b, h, fc, fy, Ast) / 1_000
 
-        df[['M2_Mag', 'Delta_2']] = df.apply(
-            lambda r: pd.Series(
-                magnify_moment(r['P_Demand_kN'], r['M2_Demand_kNm'], h, b, fc, lu_2, k_2, Cm_2, beta_dns)),
-            axis=1)
-        df[['M3_Mag', 'Delta_3']] = df.apply(
-            lambda r: pd.Series(
-                magnify_moment(r['P_Demand_kN'], r['M3_Demand_kNm'], b, h, fc, lu_3, k_3, Cm_3, beta_dns)),
-            axis=1)
-
-        df['DC_2'] = df.apply(lambda r: get_dc_ratio(pm2, r['P_Demand_kN'], r['M2_Mag']), axis=1)
-        df['DC_3'] = df.apply(lambda r: get_dc_ratio(pm3, r['P_Demand_kN'], r['M3_Mag']), axis=1)
-        df['Alpha'] = df.apply(lambda r: dynamic_alpha(r['P_Demand_kN'], Po_kN), axis=1)
-        df['PMM'] = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), axis=1)
+        df = evaluate_frame_demands(
+            df, pm2, pm3, Po_kN, b, h, fc,
+            lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns
+        )
 
         max_idx = df['PMM'].idxmax()
         max_ratio = df.loc[max_idx, 'PMM']
@@ -518,36 +657,182 @@ def batch_process_all_frames(df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
 
 
 # ============================================================
-# SAVE/LOAD STATE FUNCTIONS
+# SAVE/LOAD STATE FUNCTIONS (Excel format)
 # ============================================================
 
 def save_state(state_data):
-    """Save current state to JSON file"""
-    if not os.path.exists(SAVE_DIR):
-        os.makedirs(SAVE_DIR)
+    """Save current state to Excel file with organized sheets"""
+    ensure_save_dir()
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"rc_column_state_{timestamp}.json"
-    filepath = os.path.join(SAVE_DIR, filename)
+    filename = f"rc_column_state_{timestamp}.xlsx"
+    filepath = ensure_save_dir() / filename
 
-    with open(filepath, 'w') as f:
-        json.dump(state_data, f, indent=2)
+    # Create workbook
+    wb = Workbook()
 
-    return filepath
+    # Sheet 1: Section Properties
+    ws_section = wb.active
+    ws_section.title = "Section"
+    ws_section.append(["Property", "Value", "Unit"])
+    ws_section.append(["Width (b)", state_data['section']['b'], "mm"])
+    ws_section.append(["Depth (h)", state_data['section']['h'], "mm"])
+    ws_section.append(["f'c", state_data['section']['fc'], "MPa"])
+    ws_section.append(["fy", state_data['section']['fy'], "MPa"])
+
+    # Sheet 2: Ties
+    ws_ties = wb.create_sheet("Ties")
+    ws_ties.append(["Property", "Value", "Unit"])
+    ws_ties.append(["Tie Size", state_data['ties']['tie_size'], "-"])
+    ws_ties.append(["Clear Cover", state_data['ties']['cover'], "mm"])
+
+    # Sheet 3: Longitudinal Reinforcement
+    ws_long = wb.create_sheet("Longitudinal")
+    ws_long.append(["Property", "Value"])
+    ws_long.append(["Auto Optimize", state_data['longitudinal']['auto_opt']])
+    ws_long.append(["Bars Width (nw)", state_data['longitudinal']['nw']])
+    ws_long.append(["Bars Depth (nd)", state_data['longitudinal']['nd']])
+    ws_long.append(["Bar Size", state_data['longitudinal']['bar_size']])
+
+    # Sheet 4: Slenderness
+    ws_slender = wb.create_sheet("Slenderness")
+    ws_slender.append(["Property", "Value", "Unit"])
+    ws_slender.append(["lu axis-2", state_data['slenderness']['lu_2'], "mm"])
+    ws_slender.append(["lu axis-3", state_data['slenderness']['lu_3'], "mm"])
+    ws_slender.append(["k axis-2", state_data['slenderness']['k_2'], "-"])
+    ws_slender.append(["k axis-3", state_data['slenderness']['k_3'], "-"])
+    ws_slender.append(["Cm axis-2", state_data['slenderness']['Cm_2'], "-"])
+    ws_slender.append(["Cm axis-3", state_data['slenderness']['Cm_3'], "-"])
+    ws_slender.append(["beta_dns", state_data['slenderness']['beta_dns'], "-"])
+
+    # Sheet 5: Shear
+    ws_shear = wb.create_sheet("Shear")
+    ws_shear.append(["Property", "Value", "Unit"])
+    ws_shear.append(["Check Shear", state_data['shear']['check_shear'], "-"])
+    ws_shear.append(["fyt (shear)", state_data['shear']['fyt_shear'], "MPa"])
+
+    # Sheet 6: Grouping
+    ws_grouping = wb.create_sheet("Grouping")
+    grouping_data = state_data.get('grouping', {})
+    ws_grouping.append(["Property", "Value"])
+    ws_grouping.append(["Enable Groups", grouping_data.get('enabled', False)])
+    ws_grouping.append([])
+    ws_grouping.append(["Frame", "Group"])
+    for frame, group_name in grouping_data.get('assignments', {}).items():
+        ws_grouping.append([frame, group_name])
+
+    # Sheet 7: Metadata
+    ws_meta = wb.create_sheet("Metadata")
+    ws_meta.append(["Property", "Value"])
+    ws_meta.append(["Selected Frame", state_data.get('selected_frame', 'N/A')])
+    ws_meta.append(["CSV Path", state_data.get('csv_path', 'N/A')])
+    ws_meta.append(["Saved Timestamp", state_data.get('timestamp', 'N/A')])
+
+    # Add instructions sheet
+    ws_info = wb.create_sheet("README")
+    ws_info.append(["RC Column Designer - State File"])
+    ws_info.append([""])
+    ws_info.append(["Instructions:"])
+    ws_info.append(["1. Edit values directly in Excel"])
+    ws_info.append(["2. Keep structure intact (don't delete rows/columns)"])
+    ws_info.append(["3. Use Load State button to reload edited file"])
+    ws_info.append(["4. Boolean values: TRUE/FALSE"])
+    ws_info.append(["5. Bar sizes: DB16, DB20, DB25, DB28, DB32"])
+    ws_info.append(["6. Tie sizes: RB9, DB10, DB12"])
+
+    # Style headers
+    for ws in wb.worksheets:
+        for cell in ws[1]:
+            cell.font = openpyxl.styles.Font(bold=True)
+            cell.fill = openpyxl.styles.PatternFill(start_color="DDDDDD", end_color="DDDDDD", fill_type="solid")
+
+    wb.save(filepath)
+    return str(filepath)
 
 
 def load_state(filepath):
-    """Load state from JSON file"""
-    with open(filepath, 'r') as f:
-        return json.load(f)
+    """Load state from Excel file"""
+    wb = openpyxl.load_workbook(filepath, data_only=True)
+
+    state_data = {}
+
+    # Read Section sheet
+    ws_section = wb['Section']
+    state_data['section'] = {
+        'b': int(ws_section['B2'].value),
+        'h': int(ws_section['B3'].value),
+        'fc': int(ws_section['B4'].value),
+        'fy': int(ws_section['B5'].value)
+    }
+
+    # Read Ties sheet
+    ws_ties = wb['Ties']
+    state_data['ties'] = {
+        'tie_size': str(ws_ties['B2'].value),
+        'cover': int(ws_ties['B3'].value)
+    }
+
+    # Read Longitudinal sheet
+    ws_long = wb['Longitudinal']
+    state_data['longitudinal'] = {
+        'auto_opt': bool(ws_long['B2'].value),
+        'nw': int(ws_long['B3'].value),
+        'nd': int(ws_long['B4'].value),
+        'bar_size': str(ws_long['B5'].value)
+    }
+
+    # Read Slenderness sheet
+    ws_slender = wb['Slenderness']
+    state_data['slenderness'] = {
+        'lu_2': int(ws_slender['B2'].value),
+        'lu_3': int(ws_slender['B3'].value),
+        'k_2': float(ws_slender['B4'].value),
+        'k_3': float(ws_slender['B5'].value),
+        'Cm_2': float(ws_slender['B6'].value),
+        'Cm_3': float(ws_slender['B7'].value),
+        'beta_dns': float(ws_slender['B8'].value)
+    }
+
+    # Read Shear sheet
+    ws_shear = wb['Shear']
+    state_data['shear'] = {
+        'check_shear': bool(ws_shear['B2'].value),
+        'fyt_shear': int(ws_shear['B3'].value)
+    }
+
+    # Read Grouping sheet
+    state_data['grouping'] = {'enabled': False, 'assignments': {}}
+    if 'Grouping' in wb.sheetnames:
+        ws_grouping = wb['Grouping']
+        state_data['grouping']['enabled'] = bool(ws_grouping['B2'].value)
+        assignments = {}
+        row_idx = 5
+        while True:
+            frame = ws_grouping[f'A{row_idx}'].value
+            group_name = ws_grouping[f'B{row_idx}'].value
+            if frame is None:
+                break
+            assignments[frame] = normalize_group_name(group_name, frame)
+            row_idx += 1
+        state_data['grouping']['assignments'] = assignments
+
+    # Read Metadata sheet
+    ws_meta = wb['Metadata']
+    selected_frame = ws_meta['B2'].value
+    state_data['selected_frame'] = selected_frame if selected_frame and selected_frame != 'N/A' else None
+    csv_path = ws_meta['B3'].value
+    state_data['csv_path'] = str(csv_path) if csv_path and csv_path != 'N/A' else None
+    state_data['timestamp'] = str(ws_meta['B4'].value) if ws_meta['B4'].value else datetime.now().isoformat()
+
+    return state_data
 
 
 def get_saved_files():
     """Get list of saved state files"""
-    if not os.path.exists(SAVE_DIR):
+    if not SAVE_DIR.exists():
         return []
 
-    files = [f for f in os.listdir(SAVE_DIR) if f.startswith('rc_column_state_') and f.endswith('.json')]
+    files = [f.name for f in SAVE_DIR.iterdir() if f.name.startswith('rc_column_state_') and f.suffix == '.xlsx']
     files.sort(reverse=True)  # Newest first
     return files
 
@@ -558,14 +843,15 @@ def get_saved_files():
 sb = st.sidebar
 
 # --- Save/Load State Section ---
-sb.markdown("### 💾 Save/Load State")
+sb.markdown("### 💾 Save/Load State (Excel)")
+sb.caption("Save to .xlsx for easy editing in Excel")
 
 # Initialize session state for saved files list
 if 'saved_files' not in st.session_state:
     st.session_state.saved_files = get_saved_files()
 
 # Save button
-if st.button("💾 Save Current State", key="save_state_btn"):
+if sb.button("💾 Save Current State", key="save_state_btn"):
     state_to_save = {
         'section': {
             'b': st.session_state.get('b', 800),
@@ -596,6 +882,10 @@ if st.button("💾 Save Current State", key="save_state_btn"):
             'check_shear': st.session_state.get('check_shear', False),
             'fyt_shear': st.session_state.get('fyt_shear', 400),
         },
+        'grouping': {
+            'enabled': st.session_state.get('enable_groups', False),
+            'assignments': st.session_state.get('group_assignments', {}),
+        },
         'selected_frame': st.session_state.get('frame_id', None),
         'csv_path': st.session_state.get('csv_path', None),
         'timestamp': datetime.now().isoformat(),
@@ -603,16 +893,17 @@ if st.button("💾 Save Current State", key="save_state_btn"):
 
     filepath = save_state(state_to_save)
     st.session_state.saved_files = get_saved_files()
-    st.success(f"Saved to: {filepath}")
+    st.success(f"✅ Saved to: {filepath}")
+    sb.info("💡 Tip: Open .xlsx file in Excel to edit, then reload!")
 
 # Load section
 saved_files = get_saved_files()
 if saved_files:
-    file_options = {f: f.replace('rc_column_state_', '').replace('.json', '') for f in saved_files}
+    file_options = {f: f.replace('rc_column_state_', '').replace('.xlsx', '') for f in saved_files}
     selected_file = sb.selectbox("Load saved state", list(file_options.keys()), format_func=lambda x: file_options[x])
 
     if sb.button("📂 Load Selected State", key="load_state_btn"):
-        filepath = os.path.join(SAVE_DIR, selected_file)
+        filepath = str(SAVE_DIR / selected_file)
         try:
             loaded_data = load_state(filepath)
 
@@ -645,6 +936,10 @@ if saved_files:
             if 'shear' in loaded_data:
                 st.session_state.check_shear = loaded_data['shear']['check_shear']
                 st.session_state.fyt_shear = loaded_data['shear']['fyt_shear']
+
+            if 'grouping' in loaded_data:
+                st.session_state.enable_groups = loaded_data['grouping'].get('enabled', False)
+                st.session_state.group_assignments = loaded_data['grouping'].get('assignments', {})
 
             if 'selected_frame' in loaded_data and loaded_data['selected_frame']:
                 st.session_state.frame_id = loaded_data['selected_frame']
@@ -719,6 +1014,13 @@ st.title("🏗️ RC Column Designer - ACI 318-19")
 st.caption("Non-sway · Discrete 4-face rebar · PCA biaxial (Bresler-Parme) · Radial D/C interpolation")
 st.warning("**Scope:** Non-sway frames only. Seismic (Ch. 18) not checked. Preliminary design only.", icon="⚠️")
 
+# Check for openpyxl
+try:
+    import openpyxl
+except ImportError:
+    st.error("❌ Missing dependency: Please install openpyxl: `pip install openpyxl`")
+    st.stop()
+
 # ============================================================
 # FILE UPLOAD
 # ============================================================
@@ -741,8 +1043,8 @@ if uploaded is None:
 
 # Save CSV path for later (only if freshly uploaded, not loaded from state)
 if not loaded_from_state and hasattr(uploaded, 'name') and hasattr(uploaded, 'getvalue'):
-    # st.session_state.csv_path = os.path.join(SAVE_DIR, uploaded.name)
-    st.session_state.csv_path = r"D:\Backup\_Project\New folder\Load.csv"
+    ensure_save_dir()
+    st.session_state.csv_path = str(ensure_save_dir() / uploaded.name)
     # Save a copy of the CSV for persistence
     with open(st.session_state.csv_path, 'wb') as f:
         f.write(uploaded.getvalue())
@@ -758,18 +1060,80 @@ if 'Frame' in df_raw.columns:
 for col in ['P', 'M2', 'M3', 'V2', 'V3']:
     if col in df_raw.columns:
         df_raw[col] = pd.to_numeric(df_raw[col], errors='coerce')
-if 'Frame' not in df_raw.columns:
-    st.error("CSV must contain a 'Frame' column.")
+required_cols = {'Frame', 'OutputCase', 'P', 'M2', 'M3'}
+missing_cols = sorted(required_cols - set(df_raw.columns))
+if missing_cols:
+    st.error(f"CSV is missing required columns: {', '.join(missing_cols)}")
     st.stop()
 
 sb.markdown("### Select column")
 frame_id = sb.selectbox("Frame", df_raw['Frame'].unique(), key='frame_id')
 
-df = df_raw[df_raw['Frame'] == frame_id].copy()
-df['Load_Combo'] = df['OutputCase']
-df['P_Demand_kN'] = df['P'] * -1
-df['M2_Demand_kNm'] = df['M2']
-df['M3_Demand_kNm'] = df['M3']
+# ============================================================
+# GROUPING FEATURE
+# ============================================================
+sb.markdown("---")
+sb.markdown("### 🔗 Column Grouping")
+sb.caption("Group columns with same design")
+
+enable_groups = sb.checkbox("Enable column groups", value=False, key='enable_groups',
+                            help="Design multiple frames together using worst-case demands")
+
+group_assignments = {}
+if enable_groups:
+    unique_frames = sorted(df_raw['Frame'].unique())
+    existing_assignments = st.session_state.get('group_assignments', {})
+    group_assignments = sync_group_assignments(unique_frames, existing_assignments)
+
+    # Show group assignment editor
+    sb.markdown("**Assign frames to groups**")
+
+    # Create editable table for group assignments
+    group_df = pd.DataFrame({
+        'Frame': unique_frames,
+        'Group': [group_assignments[f] for f in unique_frames]
+    })
+
+    edited_df = sb.data_editor(
+        group_df,
+        column_config={
+            "Frame": st.column_config.TextColumn("Frame", disabled=True),
+            "Group": st.column_config.TextColumn("Group", help="Enter group name (e.g., C1, C2)")
+        },
+        hide_index=True,
+        use_container_width=True,
+        key='group_editor'
+    )
+
+    # Update session state with edited assignments
+    for _, row in edited_df.iterrows():
+        frame = row['Frame']
+        group_assignments[frame] = normalize_group_name(row['Group'], frame)
+    st.session_state.group_assignments = group_assignments
+
+    # Show group summary
+    grouped_frames = get_grouped_frames(group_assignments)
+    unique_groups = [group_name for group_name, _ in grouped_frames]
+    multi_frame_groups = sum(1 for _, frames in grouped_frames if len(frames) > 1)
+    sb.caption(f"{multi_frame_groups} groups contain multiple frames")
+    sb.markdown(f"📊 **{len(unique_groups)} groups** from {len(unique_frames)} frames")
+
+    # Group selection for detailed view
+    selected_group = sb.selectbox("View group details", unique_groups, key='selected_group')
+    frames_in_group = dict(grouped_frames)[selected_group]
+    sb.caption(f"Frames in group '{selected_group}': {', '.join(map(str, frames_in_group))}")
+
+if enable_groups:
+    analysis_subject_name = f"Group: {selected_group}"
+    analysis_frames = frames_in_group
+    df = prepare_frame_demands(df_raw[df_raw['Frame'].isin(analysis_frames)])
+else:
+    analysis_subject_name = f"Frame: {frame_id}"
+    analysis_frames = [frame_id]
+    df = prepare_frame_demands(df_raw[df_raw['Frame'] == frame_id])
+
+if enable_groups:
+    st.caption(f"Detailed analysis uses all load combinations from: {', '.join(map(str, analysis_frames))}")
 
 st.caption("⚠️ SAP2000 sign: P is negated (compression -> positive). Verify before use.")
 
@@ -807,25 +1171,21 @@ r3 = 0.3 * h
 klu_r_2 = (k_2 * lu_2) / r2
 klu_r_3 = (k_3 * lu_3) / r3
 
-df[['M2_Mag', 'Delta_2']] = df.apply(
-    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M2_Demand_kNm'], h, b, fc, lu_2, k_2, Cm_2, beta_dns)),
-    axis=1)
-df[['M3_Mag', 'Delta_3']] = df.apply(
-    lambda r: pd.Series(magnify_moment(r['P_Demand_kN'], r['M3_Demand_kNm'], b, h, fc, lu_3, k_3, Cm_3, beta_dns)),
-    axis=1)
-
 pm2 = generate_pm_curve(h, b, fc, fy, cover, nd, nw, bar_dia, tie_d)
 pm3 = generate_pm_curve(b, h, fc, fy, cover, nw, nd, bar_dia, tie_d)
 Po_kN = get_Po(b, h, fc, fy, Ast) / 1_000
 
-df['DC_2'] = df.apply(lambda r: get_dc_ratio(pm2, r['P_Demand_kN'], r['M2_Mag']), axis=1)
-df['DC_3'] = df.apply(lambda r: get_dc_ratio(pm3, r['P_Demand_kN'], r['M3_Mag']), axis=1)
-df['Alpha'] = df.apply(lambda r: dynamic_alpha(r['P_Demand_kN'], Po_kN), axis=1)
-df['PMM'] = df.apply(lambda r: biaxial_pmm(r['DC_2'], r['DC_3'], r['Alpha']), axis=1)
+df = evaluate_frame_demands(
+    df, pm2, pm3, Po_kN, b, h, fc,
+    lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns
+)
 
 max_idx = df['PMM'].idxmax()
 max_ratio = df.loc[max_idx, 'PMM']
 max_combo = df.loc[max_idx, 'Load_Combo']
+governing_frame = df.loc[max_idx, 'Frame']
+if enable_groups:
+    max_combo = f"{governing_frame} · {max_combo}"
 
 # Shear
 shear_info = {}
@@ -841,7 +1201,7 @@ if check_shear and 'V2' in df.columns:
     V3_max = df['V3'].abs().max() if 'V3' in df.columns else 0
     shear_info = {
         'V2_max': round(V2_max, 1), 'phi_Vn2': sv2['phi_Vn_kN'],
-        'V3_max': round(V3_max, 1), 'phi_Vn3': sv2['phi_Vn_kN'],
+        'V3_max': round(V3_max, 1), 'phi_Vn3': sv3['phi_Vn_kN'],
         'pass2': V2_max <= sv2['phi_Vn_kN'],
         'pass3': V3_max <= sv3['phi_Vn_kN'],
     }
@@ -899,7 +1259,7 @@ chart_col, table_col = st.columns([5, 7])
 with chart_col:
     st.markdown("**P-M Interaction Diagram**")
     st.caption("Both axes plotted · demand colour = PMM ratio · ★ = governing combo")
-    fig = make_pmm_chart(pm2, pm3, df, frame_id, layout_text)
+    fig = make_pmm_chart(pm2, pm3, df, analysis_subject_name, layout_text)
     st.pyplot(fig, use_container_width=True)
     st.caption(
         "ℹ️ Biaxial: PCA Load Contour $(DC_2)^α+(DC_3)^α=1$, "
@@ -910,6 +1270,8 @@ with chart_col:
 with table_col:
     st.markdown("**Load-combination results**")
     disp = ['Load_Combo', 'P_Demand_kN', 'M2_Mag', 'Delta_2', 'DC_2', 'M3_Mag', 'Delta_3', 'DC_3', 'Alpha', 'PMM']
+    if enable_groups:
+        disp = ['Frame'] + disp
 
 
     def _hl_d(v):
@@ -939,33 +1301,53 @@ with table_col:
 st.markdown("---")
 pdf_col, _ = st.columns([2, 5])
 with pdf_col:
-    pdf_bytes = create_pdf(frame_id, b, h, fc, fy, layout_text, tie_text,
-                           rho_pct, max_ratio, max_combo, klu_r_2, klu_r_3, fig)
+    pdf_bytes = create_pdf(analysis_subject_name, b, h, fc, fy, layout_text, tie_text,
+                           rho_pct, max_ratio, max_combo, klu_r_2, klu_r_3, fig,
+                           governing_frame if enable_groups else None)
     st.download_button("📥 Download PDF report", data=pdf_bytes,
-                       file_name=f"Column_{frame_id}.pdf", mime="application/pdf")
+                       file_name=f"Column_{selected_group if enable_groups else frame_id}.pdf", mime="application/pdf")
 
 # ============================================================
 # BATCH PROCESS ALL FRAMES
 # ============================================================
 st.markdown("---")
 st.markdown("## 📊 Batch Process All Frames")
-st.caption("Run design checks on every frame in the CSV at once")
+st.caption("Run design checks on every frame or group at once")
+
+# Group toggle for batch processing
+active_group_assignments = group_assignments if enable_groups else {}
+batch_use_groups = st.checkbox("Process by groups", value=enable_groups and bool(active_group_assignments),
+                               key='batch_use_groups',
+                               help="Group frames together and find worst-case design for each group")
 
 if st.button("🚀 Run Batch Analysis", type="primary", key="batch_run_btn"):
-    with st.spinner(f"Processing {len(df_raw['Frame'].unique())} frames..."):
-        batch_results = batch_process_all_frames(
-            df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
-            lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns,
-            auto_opt, nw, nd, bar_dia
-        )
+    with st.spinner(f"Processing..."):
+        if batch_use_groups and active_group_assignments:
+            # Grouped batch processing
+            batch_results = batch_process_with_groups(
+                df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
+                lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns,
+                auto_opt, nw, nd, bar_dia,
+                active_group_assignments
+            )
+        else:
+            # Individual frame processing
+            batch_results = batch_process_all_frames(
+                df_raw, b, h, fc, fy, cover, tie_d, sel_tie,
+                lu_2, lu_3, k_2, k_3, Cm_2, Cm_3, beta_dns,
+                auto_opt, nw, nd, bar_dia
+            )
 
         # Store results in session state
         st.session_state.batch_results = batch_results
-        st.success(f"✅ Processed {len(batch_results)} frames!")
+        st.success(f"✅ Processed {len(batch_results)} {'groups' if batch_use_groups else 'frames'}!")
 
 # Display batch results if available
 if 'batch_results' in st.session_state:
     batch_df = st.session_state.batch_results
+
+    # Check if results are grouped or individual
+    is_grouped = 'Group' in batch_df.columns
 
     # Summary metrics
     total = len(batch_df)
@@ -974,7 +1356,7 @@ if 'batch_results' in st.session_state:
     failed = len(batch_df[batch_df['Status'].str.contains('FAIL')])
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Total Frames", total)
+    m1.metric("Total", total)
     m2.metric("✅ PASS", passed)
     m3.metric("⚠️ MARGINAL", marginal)
     m4.metric("❌ FAIL", failed)
@@ -987,7 +1369,7 @@ if 'batch_results' in st.session_state:
     else:
         m2.success(f"✅ ALL PASS!")
 
-    st.markdown("### 📋 Frame Summary Table")
+    st.markdown("### 📋 Summary Table")
 
 
     # Style the batch results
@@ -1001,7 +1383,13 @@ if 'batch_results' in st.session_state:
         return ''
 
 
-    styled_batch = (batch_df.style
+    # Select columns to display
+    if is_grouped:
+        display_cols = ['Group', 'Frames', 'Status', 'PMM', 'Governing_Combo', 'Governing_Frame', 'Rebar', 'rho_g (%)']
+    else:
+        display_cols = ['Frame', 'Status', 'PMM', 'Governing_Combo', 'Rebar', 'rho_g (%)']
+
+    styled_batch = (batch_df[display_cols].style
                     .map(style_status, subset=['Status'])
                     .format({'PMM': '{:.3f}', 'rho_g (%)': '{:.2f}'}))
 
