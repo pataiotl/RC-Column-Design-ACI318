@@ -22,7 +22,7 @@ PHI_TENSION = 0.90  # ACI Table 21.2.1 - tension-controlled
 PHI_SHEAR = 0.75  # ACI §21.2.1
 
 # Save/Load directory
-SAVE_DIR = r"C:\Users\Patai\Desktop\New folder"
+SAVE_DIR = r"C:\Users\patai.f\Desktop\New folder"
 
 # ============================================================
 # PAGE CONFIG & GLOBAL CSS
